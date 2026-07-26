@@ -38,8 +38,8 @@ export default async function StudentPage() {
   const gradelessStudent = assessmentOf(user.className) === "gradeless";
   const [report, recent, gradelessFeed, agenda, debts] = await Promise.all([
     getStudentReport(user.id, user, year),
-    gradelessStudent ? Promise.resolve([]) : getRecentGrades(user.id, year),
-    gradelessStudent ? getRecentGradelessMarks(user.id, year) : Promise.resolve([]),
+    gradelessStudent ? Promise.resolve([]) : getRecentGrades(user.id, user, year),
+    gradelessStudent ? getRecentGradelessMarks(user.id, user, year) : Promise.resolve([]),
     getStudentAgenda(year),
     getStudentOpenDebts(user.id, user, year),
   ]);

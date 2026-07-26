@@ -28,6 +28,7 @@ const NAV_BY_ROLE: Record<Role, { href: string; label: string; exact?: boolean }
     { href: "/journal/year", label: "Учебный год" },
   ],
   STUDENT: [{ href: "/student", label: "Мой дневник", exact: true }],
+  PARENT: [{ href: "/family", label: "Мои дети", exact: true }],
 };
 
 export default async function AppLayout({ children }: { children: React.ReactNode }) {

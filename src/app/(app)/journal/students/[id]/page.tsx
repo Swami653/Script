@@ -5,6 +5,7 @@ import { notFound } from "next/navigation";
 
 import { StudentReportView } from "@/components/student-report";
 import { requirePageRole } from "@/lib/auth-guards";
+import { notFoundOn404 } from "@/lib/family-guards";
 import { getStudentReport } from "@/lib/queries";
 import { formatYear, getActiveYear } from "@/lib/school-year";
 import { GRADE_EDITOR_ROLES } from "@/lib/roles";
@@ -21,7 +22,8 @@ export default async function StudentCardPage({
   const { id } = await params;
 
   const year = await getActiveYear();
-  const report = await getStudentReport(id, user, year);
+  // Несуществующий ученик — 404 от requireOwnChild внутри getStudentReport.
+  const report = await notFoundOn404(getStudentReport(id, user, year));
   if (!report) notFound();
 
   return (

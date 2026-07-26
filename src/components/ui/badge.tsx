@@ -35,6 +35,9 @@ const ROLE_TONES: Record<Role, Tone> = {
   ADMIN: "danger",
   TEACHER: "info",
   STUDENT: "success",
+  // Родитель — «подпись в дневнике», чернильный тон default (bg-primary/10):
+  // по образцу существующих тонов, без новых цветов данных.
+  PARENT: "default",
 };
 
 export function RoleBadge({ role, className }: { role: Role; className?: string }) {
@@ -42,6 +45,7 @@ export function RoleBadge({ role, className }: { role: Role; className?: string 
     ADMIN: "Администратор",
     TEACHER: "Учитель",
     STUDENT: "Ученик",
+    PARENT: "Родитель",
   };
   return (
     <Badge tone={ROLE_TONES[role]} className={className}>

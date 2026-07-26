@@ -1,5 +1,6 @@
 import type { AuditAction } from "@/lib/audit-actions";
 import { ForbiddenError, type SessionUser } from "@/lib/auth-guards";
+import { requireOwnChild } from "@/lib/family-guards";
 import {
   asMasteryLevel,
   asStampKind,
@@ -380,22 +381,15 @@ export type StudentReport = {
 
 /**
  * Сводная ведомость ученика за учебный год: предметы × 4 четверти + годовые.
- * Ученик может запросить только свою — иначе 403.
+ * Доступ решает requireOwnChild (единая дверь): чужой ребёнок для родителя
+ * и чужой дневник для ученика — 404, неотличимый от несуществующего id.
  */
 export async function getStudentReport(
   studentId: string,
   viewer: SessionUser,
   year: number,
 ): Promise<StudentReport | null> {
-  if (viewer.role === "STUDENT" && viewer.id !== studentId) {
-    throw new ForbiddenError("Ученик может просматривать только свой дневник");
-  }
-
-  const student = await prisma.user.findFirst({
-    where: { id: studentId, role: "STUDENT" },
-    select: { id: true, name: true, username: true, className: true },
-  });
-  if (!student) return null;
+  const student = await requireOwnChild(viewer, studentId);
 
   const [subjects, grades, absences, finals, masteryRows, noteRows, stampRows] =
     await Promise.all([
@@ -557,7 +551,16 @@ export type SubjectLessonRow = {
   homework: string | null;
   /** Пометка планируемой работы; защитное чтение через isGradeKind. */
   plannedKind: GradeKind | null;
-  grades: { value: number; kind: GradeKind; comment: string | null }[];
+  grades: {
+    id: string;
+    value: number;
+    kind: GradeKind;
+    comment: string | null;
+    /** Есть штамп «Ознакомлен» ЭТОГО зрителя-родителя (другим ролям — false). */
+    ackedByViewer: boolean;
+    /** Штамп есть, но оценка изменена после подписи (seenValue !== value). */
+    ackStale: boolean;
+  }[];
   /** Уровень освоения клетки (безотметочные 1–2 классы); null — не отмечен. */
   mastery: { level: MasteryLevel; comment: string | null } | null;
   /** Печати клетки; null в массиве — неизвестный вид (рисуется как «Печать»). */
@@ -601,18 +604,12 @@ export async function getStudentSubjectDetail(
   viewer: SessionUser,
   year: number,
 ): Promise<StudentSubjectDetail | null> {
-  if (viewer.role === "STUDENT" && viewer.id !== studentId) {
-    throw new ForbiddenError("Ученик может просматривать только свой дневник");
-  }
-
+  // Единая дверь: чужой ребёнок и несуществующий id неотличимы (404).
   const [student, subject] = await Promise.all([
-    prisma.user.findFirst({
-      where: { id: studentId, role: "STUDENT" },
-      select: { id: true, name: true, className: true },
-    }),
+    requireOwnChild(viewer, studentId),
     prisma.subject.findUnique({ where: { id: subjectId }, select: { id: true, name: true } }),
   ]);
-  if (!student || !subject) return null;
+  if (!subject) return null;
 
   const [lessons, grades, absences, masteryRows, stampRows, noteRows] = await Promise.all([
     prisma.lesson.findMany({
@@ -630,7 +627,15 @@ export async function getStudentSubjectDetail(
     prisma.grade.findMany({
       where: { studentId, subjectId, year, lesson: LIVE_LESSON },
       orderBy: { slot: "asc" },
-      select: { value: true, weight: true, kind: true, comment: true, lessonId: true, quarter: true },
+      select: {
+        id: true,
+        value: true,
+        weight: true,
+        kind: true,
+        comment: true,
+        lessonId: true,
+        quarter: true,
+      },
     }),
     prisma.absence.findMany({
       where: { studentId, subjectId, year, lesson: LIVE_LESSON },
@@ -651,6 +656,18 @@ export async function getStudentSubjectDetail(
       select: { text: true, quarter: true },
     }),
   ]);
+
+  // Штампы «Ознакомлен» ЭТОГО родителя — для кнопок и пометки «изменена после
+  // просмотра» в родительском разборе. Другим ролям — false/false; чужие
+  // подписи в этот запрос не попадают вовсе.
+  const viewerAcks =
+    viewer.role === "PARENT" && grades.length > 0
+      ? await prisma.gradeAck.findMany({
+          where: { parentId: viewer.id, gradeId: { in: grades.map((grade) => grade.id) } },
+          select: { gradeId: true, seenValue: true },
+        })
+      : [];
+  const ackByGrade = new Map(viewerAcks.map((ack) => [ack.gradeId, ack.seenValue]));
 
   const gradesByLesson = new Map<string, typeof grades>();
   for (const grade of grades) {
@@ -701,7 +718,14 @@ export async function getStudentSubjectDetail(
       topic: lesson.topic,
       homework: lesson.homework,
       plannedKind: isGradeKind(lesson.plannedKind) ? lesson.plannedKind : null,
-      grades: cell.map((g) => ({ value: g.value, kind: asGradeKind(g.kind), comment: g.comment })),
+      grades: cell.map((g) => ({
+        id: g.id,
+        value: g.value,
+        kind: asGradeKind(g.kind),
+        comment: g.comment,
+        ackedByViewer: ackByGrade.has(g.id),
+        ackStale: ackByGrade.has(g.id) && ackByGrade.get(g.id) !== g.value,
+      })),
       mastery,
       stamps,
       absent,
@@ -799,9 +823,36 @@ export async function getStudentAgenda(year: number, today = new Date()): Promis
   };
 }
 
-/** Последние оценки ученика — лента «что нового» в дневнике. */
-export async function getRecentGrades(studentId: string, year: number, take = 12) {
-  return prisma.grade.findMany({
+/** Оценка ленты «что нового»; acked/ackStale — штамп зрителя-родителя. */
+export type RecentGrade = {
+  id: string;
+  value: number;
+  quarter: number;
+  kind: string;
+  comment: string | null;
+  createdAt: Date;
+  subject: { id: string; name: string };
+  lesson: { date: Date; topic: string | null };
+  teacher: { name: string } | null;
+  /** Есть штамп «Ознакомлен» ЭТОГО зрителя-родителя (другим ролям — false). */
+  acked: boolean;
+  /** Штамп есть, но оценка изменена после подписи (seenValue !== value). */
+  ackStale: boolean;
+};
+
+/**
+ * Последние оценки ученика — лента «что нового» в дневнике и на семейном
+ * экране. Доступ решает requireOwnChild (единая дверь, отказ — 404).
+ */
+export async function getRecentGrades(
+  studentId: string,
+  viewer: SessionUser,
+  year: number,
+  take = 12,
+): Promise<RecentGrade[]> {
+  await requireOwnChild(viewer, studentId);
+
+  const grades = await prisma.grade.findMany({
     where: { studentId, year, lesson: LIVE_LESSON },
     orderBy: [{ lesson: { date: "desc" } }, { slot: "asc" }],
     take,
@@ -811,11 +862,60 @@ export async function getRecentGrades(studentId: string, year: number, take = 12
       quarter: true,
       kind: true,
       comment: true,
+      createdAt: true,
       subject: { select: { id: true, name: true } },
       lesson: { select: { date: true, topic: true } },
       teacher: { select: { name: true } },
     },
   });
+
+  // Штампы этого родителя — для кнопок «Ознакомлен» в ленте.
+  const acks =
+    viewer.role === "PARENT" && grades.length > 0
+      ? await prisma.gradeAck.findMany({
+          where: { parentId: viewer.id, gradeId: { in: grades.map((grade) => grade.id) } },
+          select: { gradeId: true, seenValue: true },
+        })
+      : [];
+  const ackByGrade = new Map(acks.map((ack) => [ack.gradeId, ack.seenValue]));
+
+  return grades.map((grade) => ({
+    ...grade,
+    acked: ackByGrade.has(grade.id),
+    ackStale: ackByGrade.has(grade.id) && ackByGrade.get(grade.id) !== grade.value,
+  }));
+}
+
+/**
+ * Оценки года без свежего штампа ЭТОГО родителя (нет подписи или подпись
+ * устарела) — для кнопки «Ознакомлен со всем новым». Не больше limit id.
+ */
+export async function getUnackedGradeIds(
+  studentId: string,
+  viewer: SessionUser,
+  year: number,
+  limit = 50,
+): Promise<string[]> {
+  await requireOwnChild(viewer, studentId);
+  if (viewer.role !== "PARENT") return [];
+
+  const [grades, acks] = await Promise.all([
+    prisma.grade.findMany({
+      where: { studentId, year, lesson: LIVE_LESSON },
+      orderBy: [{ lesson: { date: "desc" } }, { slot: "asc" }],
+      select: { id: true, value: true },
+    }),
+    prisma.gradeAck.findMany({
+      where: { parentId: viewer.id, grade: { studentId, year } },
+      select: { gradeId: true, seenValue: true },
+    }),
+  ]);
+  const ackByGrade = new Map(acks.map((ack) => [ack.gradeId, ack.seenValue]));
+
+  return grades
+    .filter((grade) => ackByGrade.get(grade.id) !== grade.value)
+    .slice(0, limit)
+    .map((grade) => grade.id);
 }
 
 /** Событие безотметочной ленты «что нового»: уровень или печать. */
@@ -837,12 +937,16 @@ export type GradelessFeedItem = {
  * Лента «что нового» безотметочного дневника: уровни и печати вперемешку,
  * свежие первыми. Вызывается ВМЕСТО getRecentGrades для дневника 1–2 класса.
  * Два запроса по take и слияние в JS: отдельный union в SQL не окупается.
+ * Доступ решает requireOwnChild (единая дверь, отказ — 404).
  */
 export async function getRecentGradelessMarks(
   studentId: string,
+  viewer: SessionUser,
   year: number,
   take = 12,
 ): Promise<GradelessFeedItem[]> {
+  await requireOwnChild(viewer, studentId);
+
   const [mastery, stamps] = await Promise.all([
     prisma.masteryMark.findMany({
       where: { studentId, year, lesson: LIVE_LESSON },
@@ -1514,15 +1618,13 @@ export type StudentDebt = {
   note: string | null;
 };
 
-/** Открытые долги ученика за год — полоса в дневнике. Чужие долги — 403. */
+/** Открытые долги ученика за год — полоса в дневнике. Доступ — requireOwnChild (404). */
 export async function getStudentOpenDebts(
   studentId: string,
   viewer: SessionUser,
   year: number,
 ): Promise<StudentDebt[]> {
-  if (viewer.role === "STUDENT" && viewer.id !== studentId) {
-    throw new ForbiddenError("Ученик может просматривать только свои долги");
-  }
+  await requireOwnChild(viewer, studentId);
 
   const debts = await prisma.debt.findMany({
     where: { studentId, year, clearedAt: null, lesson: LIVE_LESSON },

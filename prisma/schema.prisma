@@ -4,8 +4,8 @@
 //  * Оценка (Grade.value) — ЦЕЛОЕ число строго от 1 до 10 (10-балльная система).
 //  * Учебный год состоит из 4 четвертей: Lesson.quarter / Grade.quarter ∈ {1,2,3,4}.
 //  * Роль хранится строкой, а допустимые значения описаны типом Role
-//    в src/lib/roles.ts ("ADMIN" | "TEACHER" | "STUDENT"): так схема остаётся
-//    совместимой и с SQLite (локальная разработка), и с PostgreSQL.
+//    в src/lib/roles.ts ("ADMIN" | "TEACHER" | "STUDENT" | "PARENT"): так схема
+//    остаётся совместимой и с SQLite (локальная разработка), и с PostgreSQL.
 
 generator client {
   provider = "prisma-client-js"
@@ -43,7 +43,7 @@ model User {
   /// Инвалидация сессий: увеличивается при смене/сбросе пароля. Кладётся в JWT;
   /// если версия в токене отстала — сессия считается недействительной.
   sessionVersion   Int @default(0)
-  /// "ADMIN" | "TEACHER" | "STUDENT" — валидируется на сервере через src/lib/roles.ts
+  /// "ADMIN" | "TEACHER" | "STUDENT" | "PARENT" — валидируется на сервере через src/lib/roles.ts
   role     String @default("STUDENT")
   /// Класс ученика, например "9-А". У администраторов и учителей обычно null.
   className String?
@@ -75,6 +75,15 @@ model User {
   quarterNotesGiven QuarterNote[] @relation("TeacherNotes")
   /// Уроки, созданные пользователем как учителем.
   lessonsTaught Lesson[] @relation("TeacherLessons")
+
+  /// Семья: связи «родитель → ребёнок», где этот пользователь — родитель.
+  parentLinks ParentLink[] @relation("ParentSide")
+  /// Связи, где этот пользователь — ребёнок.
+  childLinks ParentLink[] @relation("ChildSide")
+  /// Привязка Telegram (только для роли PARENT). Одна на пользователя.
+  telegramLink       TelegramLink?
+  telegramCodes      TelegramLinkCode[]
+  notificationEvents NotificationEvent[]
 
   @@index([role])
   @@index([className])
@@ -250,6 +259,9 @@ model Grade {
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  /// Штампы «семья ознакомлена». Уходят каскадом вместе с оценкой.
+  acks GradeAck[]
 
   /// У ученика не может быть двух оценок в одной позиции одного урока,
   /// но может быть две оценки за урок в разных позициях (slot 0 и 1).
@@ -427,4 +439,92 @@ model QuarterNote {
   @@unique([studentId, subjectId, year, quarter])
   @@index([studentId, year])
   @@index([subjectId, year, quarter])
+}
+
+/// Связь родителя с ребёнком. Создаёт только ADMIN (linkParentAction / createParentAction).
+/// ИНВАРИАНТ (на записи + перепроверка на чтении в requireOwnChild):
+/// parent.role = "PARENT", student.role = "STUDENT".
+model ParentLink {
+  id       String @id @default(cuid())
+  parentId String
+  parent   User   @relation("ParentSide", fields: [parentId], references: [id], onDelete: Cascade)
+
+  studentId String
+  student   User   @relation("ChildSide", fields: [studentId], references: [id], onDelete: Cascade)
+
+  /// Когда родитель в последний раз открывал дневник ЭТОГО ребёнка —
+  /// питает «что нового». Своя у каждого родителя (мама и папа не затирают друг друга).
+  lastViewedAt DateTime?
+  createdAt    DateTime  @default(now())
+  /// Снимок id админа БЕЗ FK (паттерн AuditLog).
+  createdById  String?
+
+  @@unique([parentId, studentId])
+  @@index([studentId])
+}
+
+/// Штамп «Ознакомлен» — цифровая подпись в дневнике. Документ:
+/// parentId/parentName — снимки БЕЗ FK (переживает удаление родителя),
+/// seenValue — значение оценки, которое родитель видел в момент подписи.
+/// «Штамп устарел» НЕ хранится — выводится сравнением seenValue !== grade.value.
+model GradeAck {
+  id      String @id @default(cuid())
+  gradeId String
+  grade   Grade  @relation(fields: [gradeId], references: [id], onDelete: Cascade)
+
+  parentId   String
+  parentName String
+  seenValue  Int
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([gradeId, parentId])
+  @@index([parentId, createdAt])
+}
+
+/// Привязка Telegram-чата. chatId — TEXT: телеграмный int64 не влезает
+/// в безопасный диапазон JS number. blockedAt — родитель заблокировал бота
+/// (ответ 403 от API); ставится дренажем, сбрасывается при новой привязке.
+model TelegramLink {
+  id        String    @id @default(cuid())
+  userId    String    @unique
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  chatId    String    @unique
+  createdAt DateTime  @default(now())
+  blockedAt DateTime?
+}
+
+/// Одноразовый код привязки. В базе ТОЛЬКО SHA-256-хеш — открытый код
+/// показывается админу один раз при выдаче (дисциплина tempPassword).
+model TelegramLinkCode {
+  id        String    @id @default(cuid())
+  codeHash  String    @unique
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+}
+
+/// Outbox уведомлений. Строка на СОБЫТИЕ (не на получателя): получатели
+/// резолвятся живыми ParentLink→TelegramLink в момент отправки — отвязка
+/// родителя мгновенно глушит поток. Поля-снимки: событие переживает правку
+/// и удаление оценки. Комментария учителя здесь НЕТ намеренно (минимизация:
+/// что не хранится — не утечёт в мессенджер).
+model NotificationEvent {
+  id          String    @id @default(cuid())
+  studentId   String
+  student     User      @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  studentName String
+  subjectName String
+  lessonDate  DateTime
+  value       Int
+  kind        String
+  createdAt   DateTime  @default(now())
+  sentAt      DateTime?
+  attempts    Int       @default(0)
+
+  @@index([sentAt, createdAt])
 }

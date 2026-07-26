@@ -4,6 +4,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 
 import { requirePageUser } from "@/lib/auth-guards";
+import { notFoundOn404 } from "@/lib/family-guards";
 import { formatLevelCounts } from "@/lib/gradeless";
 import {
   averageColorClasses,
@@ -50,7 +51,8 @@ export default async function StudentSubjectPage({
   const studentId = viewer.role === "STUDENT" ? viewer.id : (query.student ?? viewer.id);
   const year = await getActiveYear();
 
-  const detail = await getStudentSubjectDetail(studentId, subjectId, viewer, year);
+  // Чужой или несуществующий ученик — 404 от requireOwnChild внутри запроса.
+  const detail = await notFoundOn404(getStudentSubjectDetail(studentId, subjectId, viewer, year));
   if (!detail) notFound();
 
   const backHref =

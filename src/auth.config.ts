@@ -1,6 +1,22 @@
 import type { NextAuthConfig } from "next-auth";
 
-import { asRole, ROLE_HOME } from "@/lib/roles";
+import { asRole, ROLE_HOME, type Role } from "@/lib/roles";
+
+/**
+ * АЛЛАУЛИСТ секций: каждая секция перечисляет роли, которым она доступна.
+ * Новая роль по умолчанию НЕ проходит никуда, пока её явно не впишут —
+ * блэклист здесь однажды чуть не пустил родителя в /journal.
+ *
+ * /student открыт и учителю с администратором: карточка ученика ведёт на
+ * разбор /student/subject/[id]?student=… — это их рабочий маршрут.
+ * Путь вне секций (/profile, /) доступен любому авторизованному.
+ */
+const SECTION_ROLES: readonly (readonly [prefix: string, allowed: readonly Role[]])[] = [
+  ["/admin", ["ADMIN"]],
+  ["/journal", ["ADMIN", "TEACHER"]],
+  ["/student", ["ADMIN", "TEACHER", "STUDENT"]],
+  ["/family", ["PARENT"]],
+];
 
 /**
  * Edge-совместимая часть конфигурации NextAuth.
@@ -61,11 +77,9 @@ export const authConfig = {
 
       const role = asRole(user.role);
 
-      // Ученик не имеет доступа к журналу учителя и админ-панели.
-      if (pathname.startsWith("/journal") && role === "STUDENT") {
-        return Response.redirect(new URL("/student", nextUrl));
-      }
-      if (pathname.startsWith("/admin") && role !== "ADMIN") {
+      // Секция найдена и роль не входит в её список — редирект в свой раздел.
+      const section = SECTION_ROLES.find(([prefix]) => pathname.startsWith(prefix));
+      if (section && !section[1].includes(role)) {
         return Response.redirect(new URL(ROLE_HOME[role], nextUrl));
       }
 

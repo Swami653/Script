@@ -26,6 +26,8 @@ export const AUDIT_ACTIONS = [
   "quarter.close",
   "quarters.close",
   "quarter.reopen",
+  "debt.set",
+  "debt.clear",
 ] as const;
 
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];
@@ -50,6 +52,8 @@ export const AUDIT_ACTION_LABELS: Record<AuditAction, string> = {
   "quarter.close": "Четверть закрыта",
   "quarters.close": "Четверть закрыта пакетом",
   "quarter.reopen": "Четверть переоткрыта",
+  "debt.set": "Долг отмечен",
+  "debt.clear": "Долг снят",
 };
 
 export function isAuditAction(value: unknown): value is AuditAction {

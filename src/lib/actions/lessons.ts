@@ -6,6 +6,7 @@ import { z } from "zod";
 import { actionError, actionFail, actionOk, type ActionResult } from "@/lib/action-result";
 import { lessonRef, logAudit } from "@/lib/audit";
 import { requireRole } from "@/lib/auth-guards";
+import { syncControlDebts } from "@/lib/debts";
 import { quarterSchema } from "@/lib/grades";
 import { assertQuarterOpen } from "@/lib/lesson-guards";
 import { prisma } from "@/lib/prisma";
@@ -574,6 +575,10 @@ export async function setLessonPlanAction(input: {
         `${lessonRef(lesson.subject.name, lesson.date)}: ` +
         `пометка «контрольная» ${parsed.plannedKind ? "установлена" : "снята"}`,
     });
+
+    // Пометка КР ретроактивно рождает авто-долги за уже стоящие «Н» (и
+    // растворяет открытые при снятии) — инвариантом владеет редьюсер.
+    await syncControlDebts(lesson.id);
 
     revalidatePath("/journal");
     revalidatePath("/student");

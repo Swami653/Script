@@ -235,6 +235,9 @@ export default async function JournalPage({ searchParams }: { searchParams: Sear
             ]),
           ),
           absentLessons: row.absentLessons,
+          openDebts: Object.fromEntries(
+            row.openDebts.map((debt) => [debt.lessonId, debt.debtId]),
+          ),
           quarterAverages: row.quarterAverages,
         }))}
       />

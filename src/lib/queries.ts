@@ -17,7 +17,13 @@ import {
   type Quarter,
 } from "@/lib/grades";
 import { prisma } from "@/lib/prisma";
-import { addUtcDays, parseDateInputValue, toDateInputValue, todayUtcMidnight } from "@/lib/utils";
+import {
+  addUtcDays,
+  diffUtcDays,
+  parseDateInputValue,
+  toDateInputValue,
+  todayUtcMidnight,
+} from "@/lib/utils";
 
 /**
  * Чтение данных журнала. Все функции предполагают, что вызывающая сторона
@@ -64,6 +70,12 @@ export type JournalRow = {
   cells: Record<string, CellGrade[]>;
   /** lessonId, на которых у ученика отмечено «Н» */
   absentLessons: string[];
+  /**
+   * Непрощённые долги четверти (lessonId -> debtId). «Открытость» грид
+   * дорисовывает сам: маркер гаснет, как только в клетке появляется оценка —
+   * в том числе оптимистичная, до ответа сервера.
+   */
+  openDebts: { lessonId: string; debtId: string }[];
   /** Взвешенный средний балл за выбранную четверть */
   average: number | null;
   /** Средние баллы по всем 4 четвертям (для колонки «Год») */
@@ -134,43 +146,49 @@ export async function getJournalData(
   year: number,
   className?: string | null,
 ): Promise<JournalData> {
-  const [lessons, students, gradesOfQuarter, gradesOfYear, absencesOfQuarter] = await Promise.all([
-    prisma.lesson.findMany({
-      where: { subjectId, quarter, year, ...LIVE_LESSON },
-      orderBy: { date: "asc" },
-      select: {
-        id: true,
-        date: true,
-        quarter: true,
-        topic: true,
-        homework: true,
-        plannedKind: true,
-      },
-    }),
-    getStudents(className),
-    prisma.grade.findMany({
-      where: { subjectId, quarter, year, lesson: LIVE_LESSON },
-      orderBy: { slot: "asc" },
-      select: {
-        id: true,
-        value: true,
-        slot: true,
-        kind: true,
-        weight: true,
-        comment: true,
-        studentId: true,
-        lessonId: true,
-      },
-    }),
-    prisma.grade.findMany({
-      where: { subjectId, year, lesson: LIVE_LESSON },
-      select: { value: true, weight: true, studentId: true, quarter: true },
-    }),
-    prisma.absence.findMany({
-      where: { subjectId, quarter, year, lesson: LIVE_LESSON },
-      select: { studentId: true, lessonId: true },
-    }),
-  ]);
+  const [lessons, students, gradesOfQuarter, gradesOfYear, absencesOfQuarter, debtsOfQuarter] =
+    await Promise.all([
+      prisma.lesson.findMany({
+        where: { subjectId, quarter, year, ...LIVE_LESSON },
+        orderBy: { date: "asc" },
+        select: {
+          id: true,
+          date: true,
+          quarter: true,
+          topic: true,
+          homework: true,
+          plannedKind: true,
+        },
+      }),
+      getStudents(className),
+      prisma.grade.findMany({
+        where: { subjectId, quarter, year, lesson: LIVE_LESSON },
+        orderBy: { slot: "asc" },
+        select: {
+          id: true,
+          value: true,
+          slot: true,
+          kind: true,
+          weight: true,
+          comment: true,
+          studentId: true,
+          lessonId: true,
+        },
+      }),
+      prisma.grade.findMany({
+        where: { subjectId, year, lesson: LIVE_LESSON },
+        select: { value: true, weight: true, studentId: true, quarter: true },
+      }),
+      prisma.absence.findMany({
+        where: { subjectId, quarter, year, lesson: LIVE_LESSON },
+        select: { studentId: true, lessonId: true },
+      }),
+      // Непрощённые долги четверти — маркер в клетке и кнопка «Снять долг».
+      prisma.debt.findMany({
+        where: { subjectId, quarter, year, clearedAt: null, lesson: LIVE_LESSON },
+        select: { id: true, studentId: true, lessonId: true },
+      }),
+    ]);
 
   const cellsByStudent = new Map<string, Record<string, CellGrade[]>>();
   for (const grade of gradesOfQuarter) {
@@ -195,6 +213,13 @@ export async function getJournalData(
     absentByStudent.set(absence.studentId, list);
   }
 
+  const debtsByStudent = new Map<string, { lessonId: string; debtId: string }[]>();
+  for (const debt of debtsOfQuarter) {
+    const list = debtsByStudent.get(debt.studentId) ?? [];
+    list.push({ lessonId: debt.lessonId, debtId: debt.id });
+    debtsByStudent.set(debt.studentId, list);
+  }
+
   // Взвешенные оценки года, разложенные по четвертям.
   const yearValues = new Map<string, { value: number; weight: number }[][]>();
   for (const grade of gradesOfYear) {
@@ -214,6 +239,7 @@ export async function getJournalData(
       student: { id: student.id, name: student.name, className: student.className },
       cells,
       absentLessons,
+      openDebts: debtsByStudent.get(student.id) ?? [],
       average: quarterAverages[quarter - 1] ?? null,
       quarterAverages,
       year: yearGrade(quarterAverages),
@@ -958,6 +984,142 @@ export async function getQuarterCloseOverview(
       borderline,
     };
   });
+}
+
+/* ── Долги и пересдачи ────────────────────────────────────────────────────── */
+
+export type DebtRow = {
+  id: string;
+  origin: string;
+  note: string | null;
+  student: { id: string; name: string; className: string | null };
+  lesson: { id: string; date: Date; topic: string | null; quarter: number };
+  /** Собирается в памяти, нигде не хранится: open / closedByGrade / cleared. */
+  status: "open" | "closedByGrade" | "cleared";
+  /** «Висит N дней» — со дня УРОКА (полночь UTC), а не с расторопности учителя. */
+  daysOpen: number;
+  /** Значение закрывшей оценки (slot 0), если долг закрыт оценкой. */
+  closedGrade: number | null;
+  clearedAt: Date | null;
+  /** Четверть долга закрыта замком — пересдача только уроком текущей четверти. */
+  quarterLocked: boolean;
+};
+
+/** Долги предмета за год: открытые сверху по давности, затем история. */
+export async function getSubjectDebts(subjectId: string, year: number): Promise<DebtRow[]> {
+  const [debts, locks] = await Promise.all([
+    prisma.debt.findMany({
+      where: { subjectId, year, lesson: LIVE_LESSON },
+      select: {
+        id: true,
+        origin: true,
+        note: true,
+        clearedAt: true,
+        student: { select: { id: true, name: true, className: true } },
+        lesson: { select: { id: true, date: true, topic: true, quarter: true } },
+      },
+    }),
+    prisma.quarterLock.findMany({ where: { subjectId, year }, select: { quarter: true } }),
+  ]);
+  if (debts.length === 0) return [];
+
+  // Один запрос пар (студент, урок) — статус «закрыт оценкой» ВЫВОДИТСЯ.
+  const grades = await prisma.grade.findMany({
+    where: {
+      subjectId,
+      year,
+      lessonId: { in: [...new Set(debts.map((debt) => debt.lesson.id))] },
+      slot: 0,
+    },
+    select: { studentId: true, lessonId: true, value: true },
+  });
+  const gradeByPair = new Map(
+    grades.map((grade) => [`${grade.studentId}|${grade.lessonId}`, grade.value]),
+  );
+  const lockedQuarters = new Set(locks.map((lock) => lock.quarter));
+  const todayUtc = todayUtcMidnight();
+
+  const rows: DebtRow[] = debts.map((debt) => {
+    const closedGrade = gradeByPair.get(`${debt.student.id}|${debt.lesson.id}`) ?? null;
+    const status: DebtRow["status"] = debt.clearedAt
+      ? "cleared"
+      : closedGrade !== null
+        ? "closedByGrade"
+        : "open";
+    return {
+      id: debt.id,
+      origin: debt.origin,
+      note: debt.note,
+      student: debt.student,
+      lesson: debt.lesson,
+      status,
+      daysOpen: Math.max(0, diffUtcDays(todayUtc, debt.lesson.date)),
+      closedGrade,
+      clearedAt: debt.clearedAt,
+      quarterLocked: lockedQuarters.has(debt.lesson.quarter),
+    };
+  });
+
+  // Открытые сверху, самые давние — первыми; история — свежее сверху.
+  return rows.sort((a, b) => {
+    const openA = a.status === "open" ? 0 : 1;
+    const openB = b.status === "open" ? 0 : 1;
+    if (openA !== openB) return openA - openB;
+    return openA === 0
+      ? a.lesson.date.getTime() - b.lesson.date.getTime()
+      : b.lesson.date.getTime() - a.lesson.date.getTime();
+  });
+}
+
+export type StudentDebt = {
+  id: string;
+  subject: { id: string; name: string };
+  lesson: { date: Date; topic: string | null };
+  daysOpen: number;
+  note: string | null;
+};
+
+/** Открытые долги ученика за год — полоса в дневнике. Чужие долги — 403. */
+export async function getStudentOpenDebts(
+  studentId: string,
+  viewer: SessionUser,
+  year: number,
+): Promise<StudentDebt[]> {
+  if (viewer.role === "STUDENT" && viewer.id !== studentId) {
+    throw new ForbiddenError("Ученик может просматривать только свои долги");
+  }
+
+  const debts = await prisma.debt.findMany({
+    where: { studentId, year, clearedAt: null, lesson: LIVE_LESSON },
+    orderBy: { lesson: { date: "asc" } },
+    select: {
+      id: true,
+      note: true,
+      lessonId: true,
+      lesson: {
+        select: { date: true, topic: true, subject: { select: { id: true, name: true } } },
+      },
+    },
+  });
+  if (debts.length === 0) return [];
+
+  // Минус закрытые оценкой: статус выводится, а не хранится.
+  const grades = await prisma.grade.findMany({
+    where: { studentId, lessonId: { in: debts.map((debt) => debt.lessonId) } },
+    select: { lessonId: true },
+  });
+  const gradedLessons = new Set(grades.map((grade) => grade.lessonId));
+  const todayUtc = todayUtcMidnight();
+
+  return debts
+    .filter((debt) => !gradedLessons.has(debt.lessonId))
+    .map((debt) => ({
+      id: debt.id,
+      subject: debt.lesson.subject,
+      lesson: { date: debt.lesson.date, topic: debt.lesson.topic },
+      daysOpen: Math.max(0, diffUtcDays(todayUtc, debt.lesson.date)),
+      note: debt.note,
+    }));
 }
 
 export const AUDIT_PAGE_SIZE = 50;

@@ -6,6 +6,7 @@ import { z } from "zod";
 import { actionError, actionFail, actionOk, type ActionResult } from "@/lib/action-result";
 import { lessonRef, logAudit } from "@/lib/audit";
 import { requireRole } from "@/lib/auth-guards";
+import { syncControlDebts } from "@/lib/debts";
 import {
   asGradeKind,
   GRADE_KINDS,
@@ -178,6 +179,10 @@ export async function setGradeAction(input: {
         (previousValue !== null && previousValue !== parsed.value ? `, было ${previousValue}` : ""),
     });
 
+    // Оценка закрывает долг сама (статус выводится), но клетка могла перестать
+    // быть контрольной и т.п. — редьюсер приводит долги урока к инварианту.
+    await syncControlDebts(lesson.id);
+
     revalidatePath("/journal");
     revalidatePath("/student");
 
@@ -295,6 +300,8 @@ export async function setGradesBulkAction(input: {
         `(${GRADE_KINDS[kind].label.toLowerCase()})`,
     });
 
+    await syncControlDebts(lesson.id);
+
     revalidatePath("/journal");
     revalidatePath("/student");
 
@@ -356,6 +363,10 @@ export async function deleteGradeAction(input: {
         (parsed.slot > 0 ? `, слот ${parsed.slot}` : ""),
     });
 
+    // Удаление закрывшей оценки при живом «Н» возвращает долг в открытые;
+    // без «Н» — авто-долг растворяется (решение #17). Всё делает редьюсер.
+    await syncControlDebts(lesson.id);
+
     revalidatePath("/journal");
     revalidatePath("/student");
 
@@ -410,6 +421,9 @@ export async function setAbsenceAction(input: {
         (removedGrades.count > 0 ? `, снято оценок: ${removedGrades.count}` : ""),
     });
 
+    // Именно здесь рождаются авто-долги: «Н» на прошедшей контрольной.
+    await syncControlDebts(lesson.id);
+
     revalidatePath("/journal");
     revalidatePath("/student");
     return actionOk(null, "Отмечено отсутствие");
@@ -445,6 +459,9 @@ export async function clearAbsenceAction(input: {
         details: `${lessonRef(lesson.subject.name, lesson.date)}: снята отметка «Н»`,
       });
     }
+
+    // Сняли ошибочное «Н» — фантомный авто-долг растворяется редьюсером.
+    await syncControlDebts(lesson.id);
 
     revalidatePath("/journal");
     revalidatePath("/student");
@@ -483,6 +500,8 @@ export async function clearCellAction(input: {
           `удалено ${count} ${pluralize(count, "оценка", "оценки", "оценок")}`,
       });
     }
+
+    await syncControlDebts(lesson.id);
 
     revalidatePath("/journal");
     revalidatePath("/student");

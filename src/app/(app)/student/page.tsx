@@ -13,9 +13,14 @@ import {
   formatAverage,
   GRADE_KINDS,
 } from "@/lib/grades";
-import { getRecentGrades, getStudentAgenda, getStudentReport } from "@/lib/queries";
+import {
+  getRecentGrades,
+  getStudentAgenda,
+  getStudentOpenDebts,
+  getStudentReport,
+} from "@/lib/queries";
 import { formatYear, getActiveYear } from "@/lib/school-year";
-import { cn, formatDateShort, todayUtcMidnight } from "@/lib/utils";
+import { cn, formatDateShort, pluralize, todayUtcMidnight } from "@/lib/utils";
 
 export const metadata: Metadata = { title: "Мой дневник" };
 
@@ -24,10 +29,11 @@ export default async function StudentPage() {
   const user = await requirePageRole(["STUDENT"]);
   const year = await getActiveYear();
 
-  const [report, recent, agenda] = await Promise.all([
+  const [report, recent, agenda, debts] = await Promise.all([
     getStudentReport(user.id, user, year),
     getRecentGrades(user.id, year),
     getStudentAgenda(year),
+    getStudentOpenDebts(user.id, user, year),
   ]);
   const today = todayUtcMidnight();
 
@@ -85,6 +91,31 @@ export default async function StudentPage() {
           </div>
         </dl>
       </header>
+
+      {/* Открытые долги: несданные работы, которые ждут пересдачи.
+          Нет долгов — нет и блока (стиль полосы — как у временного пароля). */}
+      {debts.length > 0 && (
+        <section className="rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-100">
+          <p className="font-semibold">
+            За вами {debts.length === 1 ? "долг" : `долги: ${debts.length}`} — работы, которые
+            нужно сдать
+          </p>
+          <ul className="mt-1 space-y-0.5">
+            {debts.map((debt) => (
+              <li key={debt.id}>
+                {debt.subject.name} — урок {formatDateShort(debt.lesson.date)}
+                {debt.lesson.topic ? ` («${debt.lesson.topic}»)` : ""}
+                {debt.note ? ` — ${debt.note}` : ""}
+                {debt.daysOpen > 0 &&
+                  ` · висит ${debt.daysOpen} ${pluralize(debt.daysOpen, "день", "дня", "дней")}`}
+              </li>
+            ))}
+          </ul>
+          <p className="mt-1 text-xs opacity-80">
+            Подойдите к учителю, чтобы договориться о пересдаче: оценка за неё закроет долг.
+          </p>
+        </section>
+      )}
 
       {/* Планы ближайших двух недель: контрольные и домашние задания */}
       <PlannedAheadSection items={agenda.planned} today={today} />

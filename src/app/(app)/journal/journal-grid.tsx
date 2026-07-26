@@ -6,6 +6,7 @@ import {
   Eraser,
   ExternalLink,
   History,
+  Hourglass,
   Trash2,
   UserX,
 } from "lucide-react";
@@ -18,6 +19,7 @@ import { AttendanceSheet } from "@/app/(app)/journal/attendance-sheet";
 import { LessonInsight } from "@/app/(app)/journal/lesson-insight";
 import { Flash, useFlash } from "@/components/flash";
 import { Button } from "@/components/ui/button";
+import { clearDebtAction, markDebtAction } from "@/lib/actions/debts";
 import {
   clearAbsenceAction,
   clearCellAction,
@@ -85,6 +87,11 @@ export type GridRow = {
   cells: Record<string, GridGrade[]>;
   /** lessonId, где у ученика отмечено «Н» */
   absentLessons: string[];
+  /**
+   * Непрощённые долги: lessonId -> debtId. Открытость грид дорисовывает сам —
+   * маркер гаснет, как только в клетке появляется оценка (и оптимистичная).
+   */
+  openDebts: Record<string, string>;
   quarterAverages: (number | null)[];
 };
 
@@ -197,6 +204,63 @@ export function JournalGrid({
       return row.absentLessons.includes(lesson.id);
     },
     [absenceOverrides, lessons, rows],
+  );
+
+  /** Непрощённый долг клетки (id) — без оптимистики: пометка идёт через refresh. */
+  const debtIdAt = useCallback(
+    (rowIndex: number, colIndex: number): string | null => {
+      const row = rows[rowIndex];
+      const lesson = lessons[colIndex];
+      if (!row || !lesson) return null;
+      return row.openDebts[lesson.id] ?? null;
+    },
+    [lessons, rows],
+  );
+
+  /**
+   * Маркер открытого долга: строка Debt есть, а оценки в клетке нет — статус
+   * «закрыт оценкой» выводится, поэтому маркер гаснет от оптимистичной оценки
+   * ещё до ответа сервера.
+   */
+  const hasOpenDebt = useCallback(
+    (rowIndex: number, colIndex: number): boolean =>
+      debtIdAt(rowIndex, colIndex) !== null && gradesAt(rowIndex, colIndex).length === 0,
+    [debtIdAt, gradesAt],
+  );
+
+  const markDebt = useCallback(
+    (rowIndex: number, colIndex: number) => {
+      const row = rows[rowIndex];
+      const lesson = lessons[colIndex];
+      if (!row || !lesson) return;
+      startTransition(async () => {
+        const result = await markDebtAction({ studentId: row.studentId, lessonId: lesson.id });
+        if (!result.ok) {
+          show("error", `${result.status}: ${result.error}`);
+          return;
+        }
+        show("success", result.message ?? "Долг отмечен");
+        router.refresh();
+      });
+    },
+    [lessons, router, rows, show],
+  );
+
+  const clearDebt = useCallback(
+    (rowIndex: number, colIndex: number) => {
+      const debtId = debtIdAt(rowIndex, colIndex);
+      if (!debtId) return;
+      startTransition(async () => {
+        const result = await clearDebtAction({ debtId });
+        if (!result.ok) {
+          show("error", `${result.status}: ${result.error}`);
+          return;
+        }
+        show("success", result.message ?? "Долг снят");
+        router.refresh();
+      });
+    },
+    [debtIdAt, router, show],
   );
 
   const rowStats = useMemo(
@@ -801,6 +865,7 @@ export function JournalGrid({
                 {lessons.map((lesson, colIndex) => {
                   const grades = gradesAt(rowIndex, colIndex);
                   const absent = isAbsent(rowIndex, colIndex);
+                  const debtOpen = hasOpenDebt(rowIndex, colIndex);
                   const isSelected = selected?.row === rowIndex && selected?.col === colIndex;
                   const key = cellKey(row.studentId, lesson.id);
                   const monthBreak =
@@ -831,14 +896,23 @@ export function JournalGrid({
                             : grades.length > 0
                               ? `оценки ${grades.map((g) => g.value).join(" и ")}`
                               : "оценка не выставлена"
-                        }`}
+                        }${debtOpen ? ", открыт долг" : ""}`}
                         className={cn(
-                          "flex h-9 w-full items-center justify-center transition-colors focus:outline-none",
+                          "relative flex h-9 w-full items-center justify-center transition-colors focus:outline-none",
                           grades.length === 0 && !absent && "hover:bg-primary/10",
                           isSelected && "ring-2 ring-inset ring-primary",
                           canEdit ? "cursor-pointer" : "cursor-default",
                         )}
                       >
+                        {/* Третий маркер клетки — долг: полый кружок в ВЕРХНЕМ ЛЕВОМ
+                            углу (низ по центру занят «КР», правый верх — комментарием) */}
+                        {debtOpen && (
+                          <span
+                            aria-hidden
+                            title="Открыт долг за работу"
+                            className="absolute left-1 top-1 h-1 w-1 rounded-full border border-amber-600 dark:border-amber-400"
+                          />
+                        )}
                         <CellContent grades={grades} absent={absent} settleKey={settled[key] ?? 0} />
                       </button>
                     </td>
@@ -920,12 +994,16 @@ export function JournalGrid({
         canEdit={canEdit}
         gradesAt={gradesAt}
         isAbsent={isAbsent}
+        hasDebtAt={(r, c) => debtIdAt(r, c) !== null}
+        hasOpenDebtAt={hasOpenDebt}
         rowStats={rowStats}
         onPick={(r, c, value, slot, kind, comment) => commitGrade(r, c, value, slot, kind, comment)}
         onUpdateMeta={(r, c, kind, comment) => updateCellMeta(r, c, kind, comment)}
         onRemove={(r, c, slot) => removeGrade(r, c, slot)}
         onAbsent={(r, c) => markAbsent(r, c)}
         onClearAbsent={(r, c) => clearAbsent(r, c)}
+        onMarkDebt={(r, c) => markDebt(r, c)}
+        onClearDebt={(r, c) => clearDebt(r, c)}
         onOpenPanel={openMobilePanel}
         askCandidates={askCandidates}
       />
@@ -969,6 +1047,7 @@ export function JournalGrid({
           y={picker.y}
           grades={gradesAt(picker.row, picker.col)}
           absent={isAbsent(picker.row, picker.col)}
+          hasDebt={debtIdAt(picker.row, picker.col) !== null}
           studentName={rows[picker.row]?.name ?? ""}
           /* Окно НЕ закрывается: после цифры учитель дописывает «за что» и комментарий */
           onPick={(value, slot, kind, comment) =>
@@ -983,6 +1062,16 @@ export function JournalGrid({
           }}
           onClearAbsent={() => {
             clearAbsent(picker.row, picker.col);
+            setPicker(null);
+            focusCell(picker.row, picker.col);
+          }}
+          onMarkDebt={() => {
+            markDebt(picker.row, picker.col);
+            setPicker(null);
+            focusCell(picker.row, picker.col);
+          }}
+          onClearDebt={() => {
+            clearDebt(picker.row, picker.col);
             setPicker(null);
             focusCell(picker.row, picker.col);
           }}
@@ -1070,12 +1159,16 @@ function MobileLessonBoard({
   canEdit,
   gradesAt,
   isAbsent,
+  hasDebtAt,
+  hasOpenDebtAt,
   rowStats,
   onPick,
   onUpdateMeta,
   onRemove,
   onAbsent,
   onClearAbsent,
+  onMarkDebt,
+  onClearDebt,
   onOpenPanel,
   askCandidates,
 }: {
@@ -1084,12 +1177,18 @@ function MobileLessonBoard({
   canEdit: boolean;
   gradesAt: (row: number, col: number) => GridGrade[];
   isAbsent: (row: number, col: number) => boolean;
+  /** Есть непрощённый долг (в т.ч. закрытый оценкой) — для кнопки «Снять долг». */
+  hasDebtAt: (row: number, col: number) => boolean;
+  /** Долг открыт (оценки нет) — для маркера на кнопке клетки. */
+  hasOpenDebtAt: (row: number, col: number) => boolean;
   rowStats: { average: number | null; year: number | null; p10: number | null; p1: number | null }[];
   onPick: (row: number, col: number, value: number, slot: number, kind: GradeKind, comment?: string) => void;
   onUpdateMeta: (row: number, col: number, kind: GradeKind, comment: string) => void;
   onRemove: (row: number, col: number, slot: number) => void;
   onAbsent: (row: number, col: number) => void;
   onClearAbsent: (row: number, col: number) => void;
+  onMarkDebt: (row: number, col: number) => void;
+  onClearDebt: (row: number, col: number) => void;
   onOpenPanel: (type: "insight" | "attendance", lessonId: string) => void;
   /** Кандидаты «Кого спросить?» — тот же штамп, что и в развороте. */
   askCandidates: ReadonlySet<string>;
@@ -1166,6 +1265,8 @@ function MobileLessonBoard({
         {rows.map((row, rowIndex) => {
           const grades = gradesAt(rowIndex, colIndex);
           const absent = isAbsent(rowIndex, colIndex);
+          const hasDebt = hasDebtAt(rowIndex, colIndex);
+          const debtOpen = hasOpenDebtAt(rowIndex, colIndex);
           const isOpen = openRow === rowIndex;
 
           return (
@@ -1198,7 +1299,7 @@ function MobileLessonBoard({
                   disabled={!canEdit}
                   aria-expanded={isOpen}
                   className={cn(
-                    "flex h-11 min-w-[3.5rem] shrink-0 items-center justify-center gap-0.5 rounded-md px-1.5 text-base font-bold tabular-nums transition-transform active:scale-95",
+                    "relative flex h-11 min-w-[3.5rem] shrink-0 items-center justify-center gap-0.5 rounded-md px-1.5 text-base font-bold tabular-nums transition-transform active:scale-95",
                     absent
                       ? "bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-100"
                       : grades.length === 0
@@ -1207,6 +1308,13 @@ function MobileLessonBoard({
                     isOpen && "ring-2 ring-primary",
                   )}
                 >
+                  {/* Маркер открытого долга — тот же язык, что и в развороте */}
+                  {debtOpen && (
+                    <span
+                      aria-hidden
+                      className="absolute left-1 top-1 h-1 w-1 rounded-full border border-amber-600 dark:border-amber-400"
+                    />
+                  )}
                   {absent
                     ? "Н"
                     : grades.length === 0
@@ -1324,6 +1432,25 @@ function MobileLessonBoard({
                     {absent ? "Снять «Н» (был на уроке)" : "Отметить «Н» (отсутствовал)"}
                   </button>
 
+                  {/* Долг за работу: пометить вручную или снять непрощённый */}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (hasDebt) onClearDebt(rowIndex, colIndex);
+                      else onMarkDebt(rowIndex, colIndex);
+                      setOpenRow(null);
+                    }}
+                    className={cn(
+                      "focus-ring flex h-10 w-full items-center justify-center gap-1.5 rounded-md text-sm font-medium",
+                      hasDebt
+                        ? "bg-amber-50 text-amber-900 ring-1 ring-amber-200 dark:bg-amber-500/10 dark:text-amber-100 dark:ring-amber-500/30"
+                        : "text-muted-foreground ring-1 ring-border",
+                    )}
+                  >
+                    <Hourglass className="h-4 w-4" aria-hidden />
+                    {hasDebt ? "Снять долг" : "Отметить долг (несданная работа)"}
+                  </button>
+
                   <button
                     type="button"
                     onClick={() => {
@@ -1375,24 +1502,31 @@ function GradePicker({
   y,
   grades,
   absent,
+  hasDebt,
   studentName,
   onPick,
   onUpdateMeta,
   onRemove,
   onAbsent,
   onClearAbsent,
+  onMarkDebt,
+  onClearDebt,
   onClose,
 }: {
   x: number;
   y: number;
   grades: GridGrade[];
   absent: boolean;
+  /** У клетки есть непрощённый долг — кнопка меняется на «Снять долг». */
+  hasDebt: boolean;
   studentName: string;
   onPick: (value: number, slot: number, kind: GradeKind, comment?: string) => void;
   onUpdateMeta: (kind: GradeKind, comment: string) => void;
   onRemove: (slot: number) => void;
   onAbsent: () => void;
   onClearAbsent: () => void;
+  onMarkDebt: () => void;
+  onClearDebt: () => void;
   onClose: () => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
@@ -1551,6 +1685,21 @@ function GradePicker({
           ? "Тип и комментарий сохраняются сразу — окно можно просто закрыть."
           : "Поставьте оценку — тип и комментарий сохранятся вместе с ней."}
       </p>
+
+      {/* Долг за работу: ручная пометка или снятие — язык раздела «Долги» */}
+      <button
+        type="button"
+        onClick={hasDebt ? onClearDebt : onMarkDebt}
+        className={cn(
+          "focus-ring mt-2 flex w-full items-center justify-center gap-1 rounded px-2 py-1 text-xs font-medium",
+          hasDebt
+            ? "bg-amber-50 text-amber-900 ring-1 ring-amber-200 dark:bg-amber-500/10 dark:text-amber-100 dark:ring-amber-500/30"
+            : "text-muted-foreground hover:bg-accent",
+        )}
+      >
+        <Hourglass className="h-3.5 w-3.5" aria-hidden />
+        {hasDebt ? "Снять долг" : "Долг за работу"}
+      </button>
 
       <div className="mt-2 flex items-center gap-1.5 border-t border-rule pt-2">
         {saved && (

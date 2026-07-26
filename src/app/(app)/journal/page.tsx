@@ -1,9 +1,10 @@
-import { BookOpen } from "lucide-react";
+import { BookOpen, ClipboardList } from "lucide-react";
 import type { Metadata } from "next";
 import Link from "next/link";
 
 import { JournalGrid } from "@/app/(app)/journal/journal-grid";
 import { JournalToolbar } from "@/app/(app)/journal/journal-toolbar";
+import { ClosedStamp } from "@/components/closed-stamp";
 import { requirePageRole } from "@/lib/auth-guards";
 import {
   averageColorClasses,
@@ -15,6 +16,7 @@ import {
 import {
   getClassNames,
   getJournalData,
+  getQuarterLocksForYear,
   getQuartersWithLessons,
   getSubjects,
   getTopicSuggestions,
@@ -22,7 +24,7 @@ import {
 import { currentQuarter } from "@/lib/quarters";
 import { GRADE_EDITOR_ROLES } from "@/lib/roles";
 import { formatYear, getActiveYear, getKnownYears, getQuarterPeriods } from "@/lib/school-year";
-import { pluralize } from "@/lib/utils";
+import { formatDateLong, formatDateShort, pluralize, todayUtcMidnight } from "@/lib/utils";
 
 export const metadata: Metadata = { title: "Журнал класса" };
 
@@ -83,7 +85,26 @@ export default async function JournalPage({ searchParams }: { searchParams: Sear
     ? { startDate: period.startDate.toISOString(), endDate: period.endDate.toISOString() }
     : null;
 
-  const data = await getJournalData(subjectId, quarter, year, className);
+  const [data, locks] = await Promise.all([
+    getJournalData(subjectId, quarter, year, className),
+    getQuarterLocksForYear(year),
+  ]);
+
+  // Замок выбранной четверти предмета: сетка и тулбар уходят в «только чтение».
+  const lock =
+    locks.find((item) => item.subjectId === subjectId && item.quarter === quarter) ?? null;
+  const lockedQuarters = locks
+    .filter((item) => item.subjectId === subjectId)
+    .map((item) => item.quarter);
+  const canEdit = GRADE_EDITOR_ROLES.includes(user.role) && !lock;
+
+  const resultsHref = `/journal/results?subject=${encodeURIComponent(subjectId)}&quarter=${quarter}&year=${year}${
+    className ? `&class=${encodeURIComponent(className)}` : ""
+  }`;
+
+  // «Четверть закончилась — пора подвести итоги»: период прошёл, замка нет, уроки есть.
+  const quarterEnded = Boolean(period && period.endDate < todayUtcMidnight());
+  const showCloseBanner = !lock && quarterEnded && data.lessons.length > 0;
 
   return (
     <div className="space-y-4">
@@ -121,8 +142,43 @@ export default async function JournalPage({ searchParams }: { searchParams: Sear
               {formatAverage(data.classAverage)}
             </span>
           </span>
+          <span aria-hidden>·</span>
+          <Link
+            href={resultsHref}
+            className="focus-ring rounded font-medium text-primary hover:underline"
+          >
+            Итоги четверти →
+          </Link>
         </p>
+        {lock && (
+          <p className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
+            <ClosedStamp dateLabel={formatDateShort(lock.closedAt)} size="sm" />
+            <span className="font-medium">Закрыта {formatDateLong(lock.closedAt)}</span>
+            <span className="text-muted-foreground">
+              · {lock.closedByName} · только чтение ·{" "}
+              <Link href={resultsHref} className="focus-ring rounded font-medium text-primary hover:underline">
+                ведомость
+              </Link>
+            </span>
+          </p>
+        )}
       </header>
+
+      {showCloseBanner && period && (
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-lg border border-primary/30 bg-primary/[0.04] px-4 py-2.5 text-sm">
+          <ClipboardList className="h-4 w-4 shrink-0 text-primary" aria-hidden />
+          <span className="min-w-0 flex-1">
+            {quarter} четверть закончилась {formatDateLong(period.endDate)} — пора подвести итоги
+            и поставить штамп «Закрыта».
+          </span>
+          <Link
+            href={resultsHref}
+            className="focus-ring rounded font-semibold text-primary hover:underline"
+          >
+            Итоги четверти →
+          </Link>
+        </div>
+      )}
 
       <JournalToolbar
         subjects={subjects.map((subject) => ({ id: subject.id, name: subject.name }))}
@@ -134,6 +190,8 @@ export default async function JournalPage({ searchParams }: { searchParams: Sear
         year={year}
         hasPeriods={periods.length > 0}
         currentPeriod={currentPeriod}
+        locked={Boolean(lock)}
+        lockedQuarters={lockedQuarters}
         askMode={askMode}
         topicSuggestions={topicSuggestions}
         lessons={data.lessons.map((lesson) => ({
@@ -148,7 +206,7 @@ export default async function JournalPage({ searchParams }: { searchParams: Sear
       />
 
       <JournalGrid
-        canEdit={GRADE_EDITOR_ROLES.includes(user.role)}
+        canEdit={canEdit}
         quarter={quarter}
         subjectName={subjectName}
         askMode={askMode}

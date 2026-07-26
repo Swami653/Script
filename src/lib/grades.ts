@@ -237,6 +237,82 @@ export function yearGrade(quarterAverages: readonly (number | null)[]): number |
   return Math.min(MAX_GRADE, Math.max(MIN_GRADE, rounded));
 }
 
+/**
+ * Порог «мало оценок» для четвертной отметки: если оценок в четверти меньше,
+ * мастер «Итоги четверти» помечает ученика бейджем — отметка при этом ставится.
+ * Константа общая для сервера и легенды экрана (по прецеденту MAX_BULK_GRADES);
+ * значение — для обкатки, возможно сужение.
+ */
+export const QUARTER_MIN_GRADES = 3;
+
+/**
+ * «Спорный средний»: расстояние от дробной части до границы округления (x.5)
+ * меньше этой дельты. 7.45 — спорный (до 7.5 всего 0.05), 7.75 — уже нет.
+ */
+export const BORDERLINE_DELTA = 0.25;
+
+/**
+ * Четвертная отметка по среднему баллу — делегат yearGrade от одного элемента
+ * (среднее одного элемента — сам элемент): та же формула округления (0.5 вверх,
+ * кламп 1–10), четвертная и годовая гарантированно округляются одинаково.
+ * null — не аттестован (оценок нет).
+ */
+export function quarterMark(average: number | null): number | null {
+  return yearGrade([average]);
+}
+
+/** Средний в «спорной» зоне у границы округления — мастер подсвечивает такие. */
+export function isBorderlineAverage(average: number | null): boolean {
+  if (average === null) return false;
+  const fraction = average - Math.floor(average);
+  return Math.abs(fraction - 0.5) < BORDERLINE_DELTA;
+}
+
+/**
+ * ЕДИНСТВЕННЫЙ предикат «урок — контрольная» на весь проект: пометка
+ * планирования plannedKind === "control" ИЛИ у класса есть оценки типа
+ * "control" за этот урок. Им пользуются и авто-долги (syncControlDebts),
+ * и мастер «Итоги четверти» — два определения разошлись бы худшим багом фазы.
+ */
+export function isControlLesson(
+  plannedKind: string | null,
+  gradeKinds: readonly string[],
+): boolean {
+  return plannedKind === "control" || gradeKinds.includes("control");
+}
+
+/** Сводка качества и успеваемости по четвертным отметкам класса. */
+export type ClassSummary = {
+  /** Учеников в ведомости. */
+  total: number;
+  /** С отметкой (не «н/а»). */
+  graded: number;
+  /** Неаттестованных («н/а»). */
+  unassessed: number;
+  /** Доля аттестованных с отметкой QUALITY_MIN_GRADE..10, целые %; null — некому. */
+  qualityPercent: number | null;
+  /** Доля аттестованных с отметкой PASSING_MIN_GRADE..10, целые %; null — некому. */
+  passingPercent: number | null;
+};
+
+/**
+ * Качество и успеваемость по ПРЕДЛАГАЕМЫМ четвертным отметкам (база — ученики,
+ * а не оценки: вторая половинка «10/9» не удваивает ученика). Проценты — как в
+ * analyzeLessonColumn: от числа аттестованных, целыми (roundTo(x, 0)).
+ */
+export function classSummary(marks: readonly (number | null)[]): ClassSummary {
+  const graded = marks.filter((mark): mark is number => mark !== null);
+  const quality = graded.filter((mark) => mark >= QUALITY_MIN_GRADE).length;
+  const passing = graded.filter((mark) => mark >= PASSING_MIN_GRADE).length;
+  return {
+    total: marks.length,
+    graded: graded.length,
+    unassessed: marks.length - graded.length,
+    qualityPercent: graded.length > 0 ? roundTo((100 * quality) / graded.length, 0) : null,
+    passingPercent: graded.length > 0 ? roundTo((100 * passing) / graded.length, 0) : null,
+  };
+}
+
 /** Клетка журнала: «10/9» для двух оценок, «8» для одной, «—» если пусто. */
 export function formatCellGrades(values: readonly number[]): string {
   if (values.length === 0) return "—";

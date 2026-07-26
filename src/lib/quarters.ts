@@ -19,6 +19,15 @@ import { quarterSchema, type Quarter } from "@/lib/grades";
  */
 export const MAX_GRID_LESSONS = 120;
 
+/**
+ * Предел пакетного закрытия четверти: столько предметов можно закрыть одним
+ * действием. В школе один учитель ведёт все предметы двух классов, поэтому
+ * закрытие «по одному» превращалось бы в 12–16 одинаковых подтверждений —
+ * мастер закрывает отмеченные предметы разом. Константа общая для сервера и
+ * панели (прецедент MAX_BULK_GRADES): форма обязана знать тот же предел.
+ */
+export const MAX_BULK_QUARTER_CLOSE = 50;
+
 export type QuarterPeriodInput = {
   quarter: number;
   startDate: string;

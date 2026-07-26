@@ -3,10 +3,16 @@ import { ForbiddenError, type SessionUser } from "@/lib/auth-guards";
 import {
   asGradeKind,
   averageGrade,
+  classSummary,
+  isBorderlineAverage,
+  isControlLesson,
   isGradeKind,
+  QUARTER_MIN_GRADES,
+  quarterMark,
   QUARTERS,
   weightedAverage,
   yearGrade,
+  type ClassSummary,
   type GradeKind,
   type Quarter,
 } from "@/lib/grades";
@@ -602,6 +608,324 @@ export async function getTrashedLessons() {
       subject: { select: { name: true } },
       _count: { select: { grades: true, absences: true } },
     },
+  });
+}
+
+/* ── Замок четверти и мастер «Итоги четверти» ─────────────────────────────── */
+
+export type QuarterLockInfo = { closedAt: Date; closedByName: string };
+
+/** Замок четверти предмета (null — четверть открыта). Не кэшировать между запросами. */
+export async function getQuarterLock(
+  subjectId: string,
+  quarter: Quarter,
+  year: number,
+): Promise<QuarterLockInfo | null> {
+  return prisma.quarterLock.findUnique({
+    where: { subjectId_year_quarter: { subjectId, year, quarter } },
+    select: { closedAt: true, closedByName: true },
+  });
+}
+
+/** Все замки учебного года — для строки-статуса журнала и матрицы на /journal/year. */
+export async function getQuarterLocksForYear(
+  year: number,
+): Promise<{ subjectId: string; quarter: number; closedAt: Date; closedByName: string }[]> {
+  return prisma.quarterLock.findMany({
+    where: { year },
+    select: { subjectId: true, quarter: true, closedAt: true, closedByName: true },
+  });
+}
+
+export type QuarterReviewRow = {
+  student: { id: string; name: string; className: string | null };
+  /** weightedAverage оценок четверти. */
+  average: number | null;
+  /** quarterMark(average); null — не аттестован. */
+  proposed: number | null;
+  gradeCount: number;
+  absenceCount: number;
+  /** isBorderlineAverage(average) — средний в спорной зоне у границы округления. */
+  borderline: boolean;
+  /** 0 < gradeCount < QUARTER_MIN_GRADES — отметка ставится, но оценок мало. */
+  belowMinGrades: boolean;
+  /** Только ПРОШЕДШИЕ контрольные без его оценки; absent — стояло ли «Н». */
+  missedControls: { lessonId: string; date: Date; topic: string | null; absent: boolean }[];
+  /** Открытых долгов: без пары в оценках и без clearedAt (выводится, не хранится). */
+  openDebts: number;
+};
+
+export type QuarterReview = {
+  locked: QuarterLockInfo | null;
+  /** Снимок при locked — экран-ведомость рисуется ИЗ НЕГО, а не из живых данных. */
+  results:
+    | {
+        studentId: string;
+        studentName: string;
+        className: string | null;
+        average: number | null;
+        finalGrade: number | null;
+        gradeCount: number;
+        absenceCount: number;
+      }[]
+    | null;
+  lessonsTotal: number;
+  lessonsWithoutTopic: { lessonId: string; date: Date }[];
+  controlCount: number;
+  /** Уроки четверти в корзине — предупреждение мастера. */
+  trashedCount: number;
+  /** Учеников после фильтра класса — для примечания «в ведомости N из M». */
+  totalStudents: number;
+  /** Только ученики «со следом» по (subjectId, year): ≥1 оценка или ≥1 «Н» за ГОД. */
+  rows: QuarterReviewRow[];
+  classAverage: number | null;
+  summary: ClassSummary;
+};
+
+/**
+ * Данные мастера «Итоги четверти». ЭТОЙ ЖЕ функцией (без фильтра класса)
+ * closeQuarterAction пишет снимок: «учитель закрыл ровно то, что видел» —
+ * конструктивно. Состав учеников — «со следом» за ГОД, а не за четверть:
+ * ученик с пустой четвертью по изучаемому предмету обязан попасть в ведомость
+ * как «н/а», а параллельный класс по чужому предмету — не попасть вовсе.
+ */
+export async function getQuarterReview(
+  subjectId: string,
+  quarter: Quarter,
+  year: number,
+  className?: string | null,
+): Promise<QuarterReview> {
+  const [lock, lessons, students, grades, absences, debts, gradeTrace, absenceTrace, trashedCount] =
+    await Promise.all([
+      prisma.quarterLock.findUnique({
+        where: { subjectId_year_quarter: { subjectId, year, quarter } },
+        select: { id: true, closedAt: true, closedByName: true },
+      }),
+      prisma.lesson.findMany({
+        where: { subjectId, quarter, year, ...LIVE_LESSON },
+        orderBy: { date: "asc" },
+        select: { id: true, date: true, topic: true, plannedKind: true },
+      }),
+      getStudents(className),
+      prisma.grade.findMany({
+        where: { subjectId, quarter, year, lesson: LIVE_LESSON },
+        select: { studentId: true, lessonId: true, value: true, weight: true, kind: true },
+      }),
+      prisma.absence.findMany({
+        where: { subjectId, quarter, year, lesson: LIVE_LESSON },
+        select: { studentId: true, lessonId: true },
+      }),
+      prisma.debt.findMany({
+        where: { subjectId, quarter, year, clearedAt: null, lesson: LIVE_LESSON },
+        select: { studentId: true, lessonId: true },
+      }),
+      prisma.grade.groupBy({
+        by: ["studentId"],
+        where: { subjectId, year, lesson: LIVE_LESSON },
+      }),
+      prisma.absence.groupBy({
+        by: ["studentId"],
+        where: { subjectId, year, lesson: LIVE_LESSON },
+      }),
+      prisma.lesson.count({
+        where: { subjectId, quarter, year, NOT: { deletedAt: null } },
+      }),
+    ]);
+
+  const results = lock
+    ? await prisma.quarterResult.findMany({
+        where: { lockId: lock.id },
+        orderBy: [{ className: "asc" }, { studentName: "asc" }],
+        select: {
+          studentId: true,
+          studentName: true,
+          className: true,
+          average: true,
+          finalGrade: true,
+          gradeCount: true,
+          absenceCount: true,
+        },
+      })
+    : null;
+
+  // Контрольные — единый предикат isControlLesson (пометка ИЛИ оценки kind=control).
+  const kindsByLesson = new Map<string, string[]>();
+  for (const grade of grades) {
+    const list = kindsByLesson.get(grade.lessonId) ?? [];
+    list.push(grade.kind);
+    kindsByLesson.set(grade.lessonId, list);
+  }
+  const todayUtc = todayUtcMidnight();
+  const controlLessons = lessons.filter((lesson) =>
+    isControlLesson(lesson.plannedKind, kindsByLesson.get(lesson.id) ?? []),
+  );
+  const pastControls = controlLessons.filter((lesson) => lesson.date <= todayUtc);
+
+  const gradesByStudent = new Map<string, { value: number; weight: number }[]>();
+  const gradedPairs = new Set<string>();
+  for (const grade of grades) {
+    const list = gradesByStudent.get(grade.studentId) ?? [];
+    list.push({ value: grade.value, weight: grade.weight });
+    gradesByStudent.set(grade.studentId, list);
+    gradedPairs.add(`${grade.studentId}|${grade.lessonId}`);
+  }
+  const absentPairs = new Set(absences.map((a) => `${a.studentId}|${a.lessonId}`));
+  const absencesByStudent = new Map<string, number>();
+  for (const absence of absences) {
+    absencesByStudent.set(absence.studentId, (absencesByStudent.get(absence.studentId) ?? 0) + 1);
+  }
+  const openDebtsByStudent = new Map<string, number>();
+  for (const debt of debts) {
+    if (gradedPairs.has(`${debt.studentId}|${debt.lessonId}`)) continue; // закрыт оценкой
+    openDebtsByStudent.set(debt.studentId, (openDebtsByStudent.get(debt.studentId) ?? 0) + 1);
+  }
+
+  const traced = new Set<string>();
+  for (const row of gradeTrace) traced.add(row.studentId);
+  for (const row of absenceTrace) traced.add(row.studentId);
+
+  const rows: QuarterReviewRow[] = students
+    .filter((student) => traced.has(student.id))
+    .map((student) => {
+      const items = gradesByStudent.get(student.id) ?? [];
+      const average = weightedAverage(items);
+      return {
+        student: { id: student.id, name: student.name, className: student.className },
+        average,
+        proposed: quarterMark(average),
+        gradeCount: items.length,
+        absenceCount: absencesByStudent.get(student.id) ?? 0,
+        borderline: isBorderlineAverage(average),
+        belowMinGrades: items.length > 0 && items.length < QUARTER_MIN_GRADES,
+        missedControls: pastControls
+          .filter((lesson) => !gradedPairs.has(`${student.id}|${lesson.id}`))
+          .map((lesson) => ({
+            lessonId: lesson.id,
+            date: lesson.date,
+            topic: lesson.topic,
+            absent: absentPairs.has(`${student.id}|${lesson.id}`),
+          })),
+        openDebts: openDebtsByStudent.get(student.id) ?? 0,
+      };
+    });
+
+  return {
+    locked: lock ? { closedAt: lock.closedAt, closedByName: lock.closedByName } : null,
+    results,
+    lessonsTotal: lessons.length,
+    lessonsWithoutTopic: lessons
+      .filter((lesson) => !lesson.topic?.trim())
+      .map((lesson) => ({ lessonId: lesson.id, date: lesson.date })),
+    controlCount: controlLessons.length,
+    trashedCount,
+    totalStudents: students.length,
+    rows,
+    classAverage: averageGrade(
+      rows.map((row) => row.average).filter((value): value is number => value !== null),
+    ),
+    summary: classSummary(rows.map((row) => row.proposed)),
+  };
+}
+
+export type QuarterCloseOverviewRow = {
+  subjectId: string;
+  subjectName: string;
+  /** Уже закрыт (когда и кем) — в пакет не попадает. */
+  locked: { closedAt: Date; closedByName: string } | null;
+  lessonsTotal: number;
+  lessonsWithoutTopic: number;
+  /** Учеников «со следом» по предмету за год. */
+  students: number;
+  /** Из них без оценок в четверти — попадут в ведомость как «н/а». */
+  unassessed: number;
+  /** Спорных средних у границы округления. */
+  borderline: number;
+};
+
+/**
+ * Готовность ВСЕХ предметов четверти к закрытию — для пакетного закрытия
+ * (в школе один учитель ведёт все предметы, по одному он закрывал бы 12–16 раз).
+ * Считается несколькими групповыми запросами, а не getQuarterReview на предмет.
+ */
+export async function getQuarterCloseOverview(
+  quarter: Quarter,
+  year: number,
+): Promise<QuarterCloseOverviewRow[]> {
+  const [subjects, locks, lessonCounts, topiclessCounts, grades, gradeTrace, absenceTrace] =
+    await Promise.all([
+      prisma.subject.findMany({ orderBy: { name: "asc" }, select: { id: true, name: true } }),
+      prisma.quarterLock.findMany({
+        where: { year, quarter },
+        select: { subjectId: true, closedAt: true, closedByName: true },
+      }),
+      prisma.lesson.groupBy({
+        by: ["subjectId"],
+        where: { year, quarter, ...LIVE_LESSON },
+        _count: { _all: true },
+      }),
+      prisma.lesson.groupBy({
+        by: ["subjectId"],
+        where: { year, quarter, ...LIVE_LESSON, OR: [{ topic: null }, { topic: "" }] },
+        _count: { _all: true },
+      }),
+      prisma.grade.findMany({
+        where: { year, quarter, lesson: LIVE_LESSON },
+        select: { subjectId: true, studentId: true, value: true, weight: true },
+      }),
+      prisma.grade.groupBy({
+        by: ["subjectId", "studentId"],
+        where: { year, lesson: LIVE_LESSON },
+      }),
+      prisma.absence.groupBy({
+        by: ["subjectId", "studentId"],
+        where: { year, lesson: LIVE_LESSON },
+      }),
+    ]);
+
+  const lockBySubject = new Map(locks.map((lock) => [lock.subjectId, lock]));
+  const lessonsBySubject = new Map(lessonCounts.map((row) => [row.subjectId, row._count._all]));
+  const topiclessBySubject = new Map(topiclessCounts.map((row) => [row.subjectId, row._count._all]));
+
+  // След за год: множество учеников предмета (оценка ИЛИ «Н» в любом периоде года).
+  const tracedBySubject = new Map<string, Set<string>>();
+  for (const row of [...gradeTrace, ...absenceTrace]) {
+    const set = tracedBySubject.get(row.subjectId) ?? new Set<string>();
+    set.add(row.studentId);
+    tracedBySubject.set(row.subjectId, set);
+  }
+
+  // Оценки четверти, разложенные по (предмет, ученик) — для средних.
+  const quarterItems = new Map<string, { value: number; weight: number }[]>();
+  for (const grade of grades) {
+    const key = `${grade.subjectId}|${grade.studentId}`;
+    const list = quarterItems.get(key) ?? [];
+    list.push({ value: grade.value, weight: grade.weight });
+    quarterItems.set(key, list);
+  }
+
+  return subjects.map((subject) => {
+    const traced = tracedBySubject.get(subject.id) ?? new Set<string>();
+    let unassessed = 0;
+    let borderline = 0;
+    for (const studentId of traced) {
+      const items = quarterItems.get(`${subject.id}|${studentId}`) ?? [];
+      if (items.length === 0) {
+        unassessed += 1;
+        continue;
+      }
+      if (isBorderlineAverage(weightedAverage(items))) borderline += 1;
+    }
+    const lock = lockBySubject.get(subject.id);
+    return {
+      subjectId: subject.id,
+      subjectName: subject.name,
+      locked: lock ? { closedAt: lock.closedAt, closedByName: lock.closedByName } : null,
+      lessonsTotal: lessonsBySubject.get(subject.id) ?? 0,
+      lessonsWithoutTopic: topiclessBySubject.get(subject.id) ?? 0,
+      students: traced.size,
+      unassessed,
+      borderline,
+    };
   });
 }
 

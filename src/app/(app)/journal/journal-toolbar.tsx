@@ -1,6 +1,6 @@
 "use client";
 
-import { CalendarPlus, Download, Keyboard, Sparkles, Users, X } from "lucide-react";
+import { CalendarPlus, Download, Keyboard, Lock, Sparkles, Users, X } from "lucide-react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useState, useTransition } from "react";
@@ -28,6 +28,8 @@ export function JournalToolbar({
   year,
   hasPeriods,
   currentPeriod,
+  locked,
+  lockedQuarters,
   askMode,
   topicSuggestions,
   lessons,
@@ -43,6 +45,10 @@ export function JournalToolbar({
   hasPeriods: boolean;
   /** Границы выбранной четверти (ISO-даты) — для вкладки «Сетка на четверть». */
   currentPeriod: { startDate: string; endDate: string } | null;
+  /** Выбранная четверть закрыта замком: инструменты записи прячутся (сервер и так отобьёт 423). */
+  locked: boolean;
+  /** Закрытые четверти текущего предмета — значок замка на кнопках-переключателях. */
+  lockedQuarters: number[];
   /** Включён ли режим «Кого спросить?» (?ask=1). */
   askMode: boolean;
   /** Темы прошлых уроков предмета — подсказки в поле темы нового урока. */
@@ -111,23 +117,27 @@ export function JournalToolbar({
         <div className="space-y-1.5">
           <Label>Четверть</Label>
           <div className="flex rounded-md border border-input bg-card p-0.5" role="group" aria-label="Четверть">
-            {QUARTERS.map((item) => (
-              <button
-                key={item}
-                type="button"
-                onClick={() => navigate({ quarter: String(item) })}
-                aria-pressed={item === quarter}
-                className={cn(
-                  "focus-ring h-8 w-11 rounded text-sm font-medium transition-colors",
-                  item === quarter
-                    ? "bg-primary text-primary-foreground shadow-sm"
-                    : "text-muted-foreground hover:bg-accent hover:text-foreground",
-                )}
-                title={`${item} четверть`}
-              >
-                {item}
-              </button>
-            ))}
+            {QUARTERS.map((item) => {
+              const isLocked = lockedQuarters.includes(item);
+              return (
+                <button
+                  key={item}
+                  type="button"
+                  onClick={() => navigate({ quarter: String(item) })}
+                  aria-pressed={item === quarter}
+                  className={cn(
+                    "focus-ring flex h-8 w-11 items-center justify-center gap-0.5 rounded text-sm font-medium transition-colors",
+                    item === quarter
+                      ? "bg-primary text-primary-foreground shadow-sm"
+                      : "text-muted-foreground hover:bg-accent hover:text-foreground",
+                  )}
+                  title={`${item} четверть${isLocked ? " — закрыта" : ""}`}
+                >
+                  {item}
+                  {isLocked && <Lock className="h-2.5 w-2.5 opacity-70" aria-hidden />}
+                </button>
+              );
+            })}
           </div>
         </div>
 
@@ -160,19 +170,23 @@ export function JournalToolbar({
           >
             <Download className="h-4 w-4" aria-hidden />
           </a>
-          <Button
-            variant="outline"
-            onClick={() => startAskTransition(() => navigate({ ask: askMode ? null : "1" }))}
-            loading={askPending}
-            aria-pressed={askMode}
-            aria-busy={askPending}
-            title="Подсветить учеников с малым числом оценок или давно не спрошенных"
-            className={cn(askMode && "border-primary text-primary")}
-          >
-            {!askPending && <Sparkles className="h-4 w-4" aria-hidden />}
-            <span className="hidden sm:inline">Кого спросить?</span>
-          </Button>
-          {lessons.length > 0 && students.length > 0 && (
+          {/* Инструменты записи в закрытой четверти прячутся: замок отобьёт их
+              и на сервере (423), но предлагать обречённое действие незачем */}
+          {!locked && (
+            <Button
+              variant="outline"
+              onClick={() => startAskTransition(() => navigate({ ask: askMode ? null : "1" }))}
+              loading={askPending}
+              aria-pressed={askMode}
+              aria-busy={askPending}
+              title="Подсветить учеников с малым числом оценок или давно не спрошенных"
+              className={cn(askMode && "border-primary text-primary")}
+            >
+              {!askPending && <Sparkles className="h-4 w-4" aria-hidden />}
+              <span className="hidden sm:inline">Кого спросить?</span>
+            </Button>
+          )}
+          {!locked && lessons.length > 0 && students.length > 0 && (
             <Button
               variant="outline"
               onClick={() => {
@@ -191,23 +205,25 @@ export function JournalToolbar({
               </span>
             </Button>
           )}
-          <Button
-            onClick={() => {
-              setAddTab((value) => (value ? null : "one"));
-              setBulkOpen(false);
-            }}
-          >
-            {addTab ? (
-              <X className="h-4 w-4" aria-hidden />
-            ) : (
-              <CalendarPlus className="h-4 w-4" aria-hidden />
-            )}
-            {addTab ? "Отмена" : "Добавить урок"}
-          </Button>
+          {!locked && (
+            <Button
+              onClick={() => {
+                setAddTab((value) => (value ? null : "one"));
+                setBulkOpen(false);
+              }}
+            >
+              {addTab ? (
+                <X className="h-4 w-4" aria-hidden />
+              ) : (
+                <CalendarPlus className="h-4 w-4" aria-hidden />
+              )}
+              {addTab ? "Отмена" : "Добавить урок"}
+            </Button>
+          )}
         </div>
       </div>
 
-      {addTab && (
+      {addTab && !locked && (
         <div className="animate-fade-in space-y-3 rounded-lg border border-rule-strong bg-secondary/50 p-3">
           {/* Сегмент: один столбец или сетка на всю четверть вперёд */}
           <div
@@ -273,7 +289,7 @@ export function JournalToolbar({
 
       {/* Условие то же, что у кнопки-переключателя: панель не должна оставаться
           на экране, когда в четверти не осталось ни одного живого урока */}
-      {bulkOpen && lessons.length > 0 && students.length > 0 && (
+      {bulkOpen && !locked && lessons.length > 0 && students.length > 0 && (
         <BulkGradePanel
           /* key — чтобы при смене урока/четверти панель начиналась с чистого выбора */
           key={`${subjectId}-${quarter}-${year}-${className ?? ""}`}
@@ -288,8 +304,12 @@ export function JournalToolbar({
         />
       )}
 
-      {/* Подсказка про клавиши бессмысленна там, где нет клавиатуры */}
-      <p className="hidden flex-wrap items-center gap-x-3 gap-y-1 px-1 text-xs text-muted-foreground md:flex">
+      {/* Подсказка про клавиши бессмысленна там, где нет клавиатуры,
+          и в закрытой четверти, где ввод оценок выключен */}
+      <p className={cn(
+        "hidden flex-wrap items-center gap-x-3 gap-y-1 px-1 text-xs text-muted-foreground",
+        !locked && "md:flex",
+      )}>
         <span className="inline-flex items-center gap-1.5 font-medium">
           <Keyboard className="h-3.5 w-3.5" aria-hidden />
           Горячие клавиши:

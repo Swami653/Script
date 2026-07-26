@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 
 import { YearManager } from "@/app/(app)/journal/year/year-manager";
 import { requirePageRole } from "@/lib/auth-guards";
+import { getQuarterLocksForYear, getSubjects } from "@/lib/queries";
 import { academicYearOf } from "@/lib/quarters";
 import { GRADE_EDITOR_ROLES } from "@/lib/roles";
 import { getActiveYear, getKnownYears, getQuarterPeriods } from "@/lib/school-year";
@@ -20,7 +21,12 @@ export default async function YearPage({ searchParams }: { searchParams: SearchP
   const requested = Number(params.year);
   const year = Number.isInteger(requested) && requested > 2000 ? requested : activeYear;
 
-  const periods = await getQuarterPeriods(year);
+  const [periods, locks, subjects] = await Promise.all([
+    getQuarterPeriods(year),
+    getQuarterLocksForYear(year),
+    getSubjects(),
+  ]);
+  const subjectNameById = new Map(subjects.map((subject) => [subject.id, subject.name]));
 
   // Предлагаем на выбор известные годы плюс соседние — чтобы можно было завести следующий.
   //
@@ -53,6 +59,14 @@ export default async function YearPage({ searchParams }: { searchParams: SearchP
           startDate: toDateInputValue(period.startDate),
           endDate: toDateInputValue(period.endDate),
         }))}
+        subjectsTotal={subjects.length}
+        locks={locks
+          .map((lock) => ({
+            quarter: lock.quarter,
+            subjectId: lock.subjectId,
+            subjectName: subjectNameById.get(lock.subjectId) ?? "?",
+          }))
+          .sort((a, b) => a.subjectName.localeCompare(b.subjectName, "ru"))}
       />
     </div>
   );

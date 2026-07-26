@@ -1,6 +1,7 @@
 "use client";
 
-import { CalendarCheck, CheckCircle2, Save, Trash2 } from "lucide-react";
+import { CalendarCheck, CheckCircle2, Lock as LockIcon, Save, Trash2 } from "lucide-react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
 
@@ -18,16 +19,23 @@ import { cn, formatDateLong } from "@/lib/utils";
 
 type PeriodInput = { quarter: number; startDate: string; endDate: string };
 
+/** Замок закрытой четверти по предмету — для строки «Закрыта: N из M предметов». */
+type LockInput = { quarter: number; subjectId: string; subjectName: string };
+
 export function YearManager({
   year,
   activeYear,
   yearOptions,
   periods,
+  subjectsTotal,
+  locks,
 }: {
   year: number;
   activeYear: number;
   yearOptions: number[];
   periods: PeriodInput[];
+  subjectsTotal: number;
+  locks: LockInput[];
 }) {
   const router = useRouter();
   const { flash, show, clear } = useFlash();
@@ -147,6 +155,7 @@ export function YearManager({
           const period = draft[quarter]!;
           const saved = periods.find((item) => item.quarter === quarter);
           const isCurrent = currentQuarter?.quarter === quarter;
+          const quarterLocks = locks.filter((lock) => lock.quarter === quarter);
 
           return (
             <div
@@ -210,6 +219,26 @@ export function YearManager({
                   {saved ? "Обновить" : "Сохранить"}
                 </Button>
               </div>
+
+              {/* Матрица закрытий: какие предметы этой четверти уже под замком */}
+              {quarterLocks.length > 0 && (
+                <p className="mt-2.5 flex flex-wrap items-center gap-1.5 border-t border-rule pt-2.5 text-xs text-muted-foreground">
+                  <LockIcon className="h-3.5 w-3.5 shrink-0" aria-hidden />
+                  <span>
+                    Закрыта: <span className="font-semibold tabular-nums">{quarterLocks.length}</span>{" "}
+                    из <span className="tabular-nums">{subjectsTotal}</span> предметов —
+                  </span>
+                  {quarterLocks.map((lock) => (
+                    <Link
+                      key={lock.subjectId}
+                      href={`/journal/results?subject=${encodeURIComponent(lock.subjectId)}&quarter=${quarter}&year=${year}`}
+                      className="focus-ring rounded bg-secondary px-1.5 py-0.5 font-medium text-foreground hover:bg-accent"
+                    >
+                      {lock.subjectName}
+                    </Link>
+                  ))}
+                </p>
+              )}
             </div>
           );
         })}

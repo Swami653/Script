@@ -23,6 +23,9 @@ export const AUDIT_ACTIONS = [
   "user.role",
   "user.resetPassword",
   "grades.bulk",
+  "quarter.close",
+  "quarters.close",
+  "quarter.reopen",
 ] as const;
 
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];
@@ -44,6 +47,9 @@ export const AUDIT_ACTION_LABELS: Record<AuditAction, string> = {
   "user.role": "Роль изменена",
   "user.resetPassword": "Пароль сброшен",
   "grades.bulk": "Оценки всему классу",
+  "quarter.close": "Четверть закрыта",
+  "quarters.close": "Четверть закрыта пакетом",
+  "quarter.reopen": "Четверть переоткрыта",
 };
 
 export function isAuditAction(value: unknown): value is AuditAction {

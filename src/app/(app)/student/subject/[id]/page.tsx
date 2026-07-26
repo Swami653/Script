@@ -11,6 +11,7 @@ import {
   QUARTERS,
   QUARTER_LABELS,
 } from "@/lib/grades";
+import { QuarterSparkline } from "@/components/sparkline";
 import { getStudentSubjectDetail } from "@/lib/queries";
 import { formatYear, getActiveYear } from "@/lib/school-year";
 import { cn, formatDateLong } from "@/lib/utils";
@@ -93,6 +94,15 @@ export default async function StudentSubjectPage({
           </div>
         </dl>
       </header>
+
+      {detail.totalGrades > 0 && (
+        <section className="rounded-lg border border-rule-strong bg-card p-4">
+          <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-muted-foreground">
+            Динамика по четвертям
+          </h2>
+          <QuarterSparkline values={detail.quarterAverages} width={320} height={64} />
+        </section>
+      )}
 
       {QUARTERS.map((quarter) => {
         const rows = detail.byQuarter[quarter - 1] ?? [];

@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 
+import { QuarterLegend, QuarterSparkline } from "@/components/sparkline";
 import { StudentReportView } from "@/components/student-report";
 import { requirePageRole } from "@/lib/auth-guards";
 import { averageColorClasses, displayQuarter, formatAverage, gradeColorClasses } from "@/lib/grades";
@@ -74,6 +75,20 @@ export default async function StudentPage() {
           </div>
         </dl>
       </header>
+
+      {report.totalGrades > 0 && (
+        <section className="rounded-lg border border-rule-strong bg-card p-4">
+          <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-muted-foreground">
+            Динамика по четвертям
+          </h2>
+          <div className="flex flex-col items-center gap-1">
+            <QuarterSparkline values={report.overallByQuarter} width={320} height={72} />
+            <div className="w-full max-w-[320px]">
+              <QuarterLegend values={report.overallByQuarter} />
+            </div>
+          </div>
+        </section>
+      )}
 
       <StudentReportView report={report} subjectHref={(id) => `/student/subject/${id}`} />
 

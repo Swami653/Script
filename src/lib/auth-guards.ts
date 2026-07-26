@@ -25,6 +25,8 @@ export type SessionUser = {
   username: string;
   role: Role;
   className: string | null;
+  /** true — пароль выдан администратором и его стоит сменить. */
+  mustChangePassword: boolean;
 };
 
 export class UnauthorizedError extends Error {
@@ -63,6 +65,7 @@ export const getCurrentUser = cache(async (): Promise<SessionUser | null> => {
       role: true,
       className: true,
       sessionVersion: true,
+      mustChangePassword: true,
     },
   });
 
@@ -81,6 +84,7 @@ export const getCurrentUser = cache(async (): Promise<SessionUser | null> => {
     username: fresh.username,
     role: asRole(fresh.role),
     className: fresh.className,
+    mustChangePassword: fresh.mustChangePassword,
   };
 });
 

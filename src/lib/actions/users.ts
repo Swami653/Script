@@ -5,13 +5,20 @@ import { revalidatePath } from "next/cache";
 import { z } from "zod";
 
 import { actionError, actionFail, actionOk, type ActionResult } from "@/lib/action-result";
+import { logAudit } from "@/lib/audit";
 import { requireRole, requireUser } from "@/lib/auth-guards";
 import { generateTempPassword } from "@/lib/password";
 import { prisma } from "@/lib/prisma";
-import { ROLES, type Role } from "@/lib/roles";
+import { asRole, ROLE_LABELS, ROLES, type Role } from "@/lib/roles";
 import { buildStudentLogin, parseStudentNames } from "@/lib/students-import";
+import { pluralize } from "@/lib/utils";
 
-/** Управление пользователями — только для роли ADMIN. */
+/**
+ * Управление пользователями — только для роли ADMIN.
+ *
+ * Создание, удаление и сброс пароля записываются в журнал изменений (logAudit).
+ * В аудит НИКОГДА не попадают пароли — даже временные.
+ */
 
 const ADMIN_ONLY: readonly Role[] = ["ADMIN"];
 const BCRYPT_ROUNDS = 10;
@@ -72,7 +79,7 @@ export async function createUserAction(input: {
   className?: string;
 }): Promise<ActionResult<{ id: string; username: string }>> {
   try {
-    await requireRole(ADMIN_ONLY);
+    const admin = await requireRole(ADMIN_ONLY);
     const parsed = createUserSchema.parse(input);
 
     const existing = await prisma.user.findUnique({
@@ -100,6 +107,15 @@ export async function createUserAction(input: {
         mustChangePassword: true,
       },
       select: { id: true, username: true },
+    });
+
+    await logAudit({
+      actor: admin,
+      action: "user.create",
+      targetName: user.username,
+      details:
+        `Создан пользователь «${parsed.name}» (${ROLE_LABELS[parsed.role]}` +
+        `${parsed.role === "STUDENT" && parsed.className?.trim() ? `, класс ${parsed.className.trim()}` : ""})`,
     });
 
     revalidatePath("/admin");
@@ -138,7 +154,7 @@ export async function bulkImportStudentsAction(input: {
   className?: string;
 }): Promise<ActionResult<BulkImportResult>> {
   try {
-    await requireRole(ADMIN_ONLY);
+    const admin = await requireRole(ADMIN_ONLY);
     const parsed = bulkImportSchema.parse(input);
 
     const names = parseStudentNames(parsed.text);
@@ -187,6 +203,19 @@ export async function bulkImportStudentsAction(input: {
       }
     }
 
+    // Одна сводная запись на весь импорт: строка на каждого из 200 учеников
+    // забила бы журнал изменений. Логины и пароли в аудит не пишем.
+    if (created.length > 0) {
+      await logAudit({
+        actor: admin,
+        action: "user.create",
+        details:
+          `Массовый импорт: создано ${created.length} из ${names.length} ` +
+          `${pluralize(names.length, "ученика", "учеников", "учеников")}` +
+          (className ? `, класс ${className}` : ""),
+      });
+    }
+
     revalidatePath("/admin");
     revalidatePath("/journal");
 
@@ -212,7 +241,7 @@ export async function deleteUserAction(input: {
 
     const user = await prisma.user.findUnique({
       where: { id: userId },
-      select: { id: true, name: true, role: true },
+      select: { id: true, name: true, username: true, role: true },
     });
     if (!user) return actionFail("Пользователь не найден", 404);
 
@@ -224,6 +253,13 @@ export async function deleteUserAction(input: {
     }
 
     await prisma.user.delete({ where: { id: userId } });
+
+    await logAudit({
+      actor: admin,
+      action: "user.delete",
+      targetName: user.username,
+      details: `Удалён пользователь «${user.name}» (${ROLE_LABELS[asRole(user.role)]})`,
+    });
 
     revalidatePath("/admin");
     revalidatePath("/journal");
@@ -241,12 +277,12 @@ export async function resetPasswordAction(input: {
   userId: string;
 }): Promise<ActionResult<{ password: string; username: string }>> {
   try {
-    await requireRole(ADMIN_ONLY);
+    const admin = await requireRole(ADMIN_ONLY);
     const userId = z.string().min(1).parse(input.userId);
 
     const user = await prisma.user.findUnique({
       where: { id: userId },
-      select: { id: true, username: true },
+      select: { id: true, username: true, name: true },
     });
     if (!user) return actionFail("Пользователь не найден", 404);
 
@@ -263,6 +299,14 @@ export async function resetPasswordAction(input: {
         // Инвалидируем прежние сессии этого пользователя.
         sessionVersion: { increment: 1 },
       },
+    });
+
+    // Сам пароль в аудит не попадает — только факт сброса.
+    await logAudit({
+      actor: admin,
+      action: "user.resetPassword",
+      targetName: user.username,
+      details: `Пароль пользователя «${user.name}» сброшен, выдан временный`,
     });
 
     revalidatePath("/admin");

@@ -4,10 +4,19 @@ import { revalidatePath } from "next/cache";
 import { z } from "zod";
 
 import { actionError, actionFail, actionOk, type ActionResult } from "@/lib/action-result";
+import { lessonRef, logAudit } from "@/lib/audit";
 import { requireRole } from "@/lib/auth-guards";
-import { asGradeKind, gradeKindSchema, gradeSlotSchema, gradeValueSchema, weightForKind } from "@/lib/grades";
+import {
+  asGradeKind,
+  GRADE_KINDS,
+  gradeKindSchema,
+  gradeSlotSchema,
+  gradeValueSchema,
+  weightForKind,
+} from "@/lib/grades";
 import { prisma } from "@/lib/prisma";
 import { GRADE_EDITOR_ROLES } from "@/lib/roles";
+import { pluralize } from "@/lib/utils";
 
 /**
  * Server Actions для работы с оценками.
@@ -19,6 +28,9 @@ import { GRADE_EDITOR_ROLES } from "@/lib/roles";
  * За один урок ученику можно поставить до MAX_GRADES_PER_LESSON оценок
  * («10/9» за контрольную) — это отдельные целые оценки, каждая из которых
  * самостоятельно участвует в среднем балле.
+ *
+ * Каждое успешное изменение записывается в журнал изменений (logAudit)
+ * СРАЗУ ПОСЛЕ изменения данных; ошибка аудита действие не роняет.
  */
 
 const setGradeSchema = z.object({
@@ -46,6 +58,17 @@ function normalizeNumberInput(value: unknown): unknown {
   }
   return value;
 }
+
+/** Поля урока, которые нужны и для записи оценки, и для строки аудита. */
+const LESSON_FOR_GRADE = {
+  id: true,
+  subjectId: true,
+  quarter: true,
+  year: true,
+  date: true,
+  deletedAt: true,
+  subject: { select: { name: true } },
+} as const;
 
 export type SavedGrade = {
   id: string;
@@ -76,45 +99,42 @@ export async function setGradeAction(input: {
       comment: typeof input.comment === "string" ? input.comment : undefined,
     });
 
-    // Вес определяет ТИП работы, а не клиент — иначе можно было бы прислать
-    // контрольную с весом 1. Храним вес денормализованно на момент выставления.
+    // Вес определяет ТИП работы на сервере, а не клиент. Сейчас все типы весят
+    // одинаково (1), но вес по-прежнему денормализуется в Grade.weight на момент
+    // выставления — механизм оставлен на случай возврата разных весов.
     const kind = asGradeKind(parsed.kind);
     const weight = weightForKind(kind);
     const comment = parsed.comment?.trim() || null;
 
-    const [lesson, student] = await Promise.all([
+    const [lesson, student, cellGrades] = await Promise.all([
       prisma.lesson.findUnique({
         where: { id: parsed.lessonId },
-        select: { id: true, subjectId: true, quarter: true, year: true },
+        select: LESSON_FOR_GRADE,
       }),
       prisma.user.findUnique({
         where: { id: parsed.studentId },
-        select: { id: true, role: true },
+        select: { id: true, role: true, name: true },
+      }),
+      prisma.grade.findMany({
+        where: { studentId: parsed.studentId, lessonId: parsed.lessonId },
+        select: { slot: true, value: true },
       }),
     ]);
 
     if (!lesson) return actionFail("Урок не найден", 404);
+    if (lesson.deletedAt) return actionFail("Урок в корзине — сначала восстановите его", 409);
     if (!student) return actionFail("Ученик не найден", 404);
     if (student.role !== "STUDENT") {
       return actionFail("Оценку можно выставить только ученику", 400);
     }
 
     // Вторую оценку нельзя поставить «через дырку»: сначала первая, потом вторая.
-    if (parsed.slot > 0) {
-      const previous = await prisma.grade.findUnique({
-        where: {
-          studentId_lessonId_slot: {
-            studentId: parsed.studentId,
-            lessonId: parsed.lessonId,
-            slot: parsed.slot - 1,
-          },
-        },
-        select: { id: true },
-      });
-      if (!previous) {
-        return actionFail("Сначала поставьте первую оценку за этот урок", 400);
-      }
+    if (parsed.slot > 0 && !cellGrades.some((grade) => grade.slot === parsed.slot - 1)) {
+      return actionFail("Сначала поставьте первую оценку за этот урок", 400);
     }
+
+    // Прежнее значение позиции — для строки «было 6» в журнале изменений.
+    const previousValue = cellGrades.find((grade) => grade.slot === parsed.slot)?.value ?? null;
 
     const grade = await prisma.grade.upsert({
       where: {
@@ -156,6 +176,18 @@ export async function setGradeAction(input: {
       where: { studentId: parsed.studentId, lessonId: parsed.lessonId },
     });
 
+    await logAudit({
+      actor: teacher,
+      action: "grade.set",
+      targetName: student.name,
+      subjectName: lesson.subject.name,
+      details:
+        `${lessonRef(lesson.subject.name, lesson.date)}: ` +
+        `оценка ${parsed.value} (${GRADE_KINDS[kind].label.toLowerCase()})` +
+        (parsed.slot > 0 ? `, слот ${parsed.slot}` : "") +
+        (previousValue !== null && previousValue !== parsed.value ? `, было ${previousValue}` : ""),
+    });
+
     revalidatePath("/journal");
     revalidatePath("/student");
 
@@ -175,7 +207,7 @@ export async function deleteGradeAction(input: {
   slot?: unknown;
 }): Promise<ActionResult<null>> {
   try {
-    await requireRole(GRADE_EDITOR_ROLES);
+    const teacher = await requireRole(GRADE_EDITOR_ROLES);
 
     const parsed = cellSchema.parse({
       studentId: input.studentId,
@@ -183,11 +215,17 @@ export async function deleteGradeAction(input: {
       slot: normalizeNumberInput(input.slot ?? 0),
     });
 
-    const cellGrades = await prisma.grade.findMany({
-      where: { studentId: parsed.studentId, lessonId: parsed.lessonId },
-      orderBy: { slot: "asc" },
-      select: { id: true, slot: true, value: true },
-    });
+    const [lesson, student, cellGrades] = await Promise.all([
+      prisma.lesson.findUnique({ where: { id: parsed.lessonId }, select: LESSON_FOR_GRADE }),
+      prisma.user.findUnique({ where: { id: parsed.studentId }, select: { name: true } }),
+      prisma.grade.findMany({
+        where: { studentId: parsed.studentId, lessonId: parsed.lessonId },
+        orderBy: { slot: "asc" },
+        select: { id: true, slot: true, value: true },
+      }),
+    ]);
+    if (!lesson || !student) return actionFail("Урок или ученик не найдены", 404);
+    if (lesson.deletedAt) return actionFail("Урок в корзине — сначала восстановите его", 409);
 
     const target = cellGrades.find((grade) => grade.slot === parsed.slot);
     if (!target) return actionOk(null, "Оценки не было");
@@ -200,6 +238,16 @@ export async function deleteGradeAction(input: {
       for (const grade of rest) {
         await tx.grade.update({ where: { id: grade.id }, data: { slot: grade.slot - 1 } });
       }
+    });
+
+    await logAudit({
+      actor: teacher,
+      action: "grade.delete",
+      targetName: student.name,
+      subjectName: lesson.subject.name,
+      details:
+        `${lessonRef(lesson.subject.name, lesson.date)}: удалена оценка ${target.value}` +
+        (parsed.slot > 0 ? `, слот ${parsed.slot}` : ""),
     });
 
     revalidatePath("/journal");
@@ -225,16 +273,14 @@ export async function setAbsenceAction(input: {
     const lessonId = z.string().min(1).parse(input.lessonId);
 
     const [lesson, student] = await Promise.all([
-      prisma.lesson.findUnique({
-        where: { id: lessonId },
-        select: { id: true, subjectId: true, quarter: true, year: true },
-      }),
-      prisma.user.findUnique({ where: { id: studentId }, select: { id: true, role: true } }),
+      prisma.lesson.findUnique({ where: { id: lessonId }, select: LESSON_FOR_GRADE }),
+      prisma.user.findUnique({ where: { id: studentId }, select: { id: true, role: true, name: true } }),
     ]);
     if (!lesson) return actionFail("Урок не найден", 404);
+    if (lesson.deletedAt) return actionFail("Урок в корзине — сначала восстановите его", 409);
     if (!student || student.role !== "STUDENT") return actionFail("Ученик не найден", 404);
 
-    await prisma.$transaction([
+    const [removedGrades] = await prisma.$transaction([
       prisma.grade.deleteMany({ where: { studentId, lessonId } }),
       prisma.absence.upsert({
         where: { studentId_lessonId: { studentId, lessonId } },
@@ -250,6 +296,16 @@ export async function setAbsenceAction(input: {
       }),
     ]);
 
+    await logAudit({
+      actor: teacher,
+      action: "absence.set",
+      targetName: student.name,
+      subjectName: lesson.subject.name,
+      details:
+        `${lessonRef(lesson.subject.name, lesson.date)}: отмечено отсутствие («Н»)` +
+        (removedGrades.count > 0 ? `, снято оценок: ${removedGrades.count}` : ""),
+    });
+
     revalidatePath("/journal");
     revalidatePath("/student");
     return actionOk(null, "Отмечено отсутствие");
@@ -264,11 +320,28 @@ export async function clearAbsenceAction(input: {
   lessonId: string;
 }): Promise<ActionResult<null>> {
   try {
-    await requireRole(GRADE_EDITOR_ROLES);
+    const teacher = await requireRole(GRADE_EDITOR_ROLES);
     const studentId = z.string().min(1).parse(input.studentId);
     const lessonId = z.string().min(1).parse(input.lessonId);
 
-    await prisma.absence.deleteMany({ where: { studentId, lessonId } });
+    const [lesson, student] = await Promise.all([
+      prisma.lesson.findUnique({ where: { id: lessonId }, select: LESSON_FOR_GRADE }),
+      prisma.user.findUnique({ where: { id: studentId }, select: { name: true } }),
+    ]);
+    if (!lesson || !student) return actionFail("Урок или ученик не найдены", 404);
+    if (lesson.deletedAt) return actionFail("Урок в корзине — сначала восстановите его", 409);
+
+    const { count } = await prisma.absence.deleteMany({ where: { studentId, lessonId } });
+
+    if (count > 0) {
+      await logAudit({
+        actor: teacher,
+        action: "absence.clear",
+        targetName: student.name,
+        subjectName: lesson.subject.name,
+        details: `${lessonRef(lesson.subject.name, lesson.date)}: снята отметка «Н»`,
+      });
+    }
 
     revalidatePath("/journal");
     revalidatePath("/student");
@@ -284,11 +357,30 @@ export async function clearCellAction(input: {
   lessonId: string;
 }): Promise<ActionResult<null>> {
   try {
-    await requireRole(GRADE_EDITOR_ROLES);
+    const teacher = await requireRole(GRADE_EDITOR_ROLES);
     const studentId = z.string().min(1).parse(input.studentId);
     const lessonId = z.string().min(1).parse(input.lessonId);
 
+    const [lesson, student] = await Promise.all([
+      prisma.lesson.findUnique({ where: { id: lessonId }, select: LESSON_FOR_GRADE }),
+      prisma.user.findUnique({ where: { id: studentId }, select: { name: true } }),
+    ]);
+    if (!lesson || !student) return actionFail("Урок или ученик не найдены", 404);
+    if (lesson.deletedAt) return actionFail("Урок в корзине — сначала восстановите его", 409);
+
     const { count } = await prisma.grade.deleteMany({ where: { studentId, lessonId } });
+
+    if (count > 0) {
+      await logAudit({
+        actor: teacher,
+        action: "cell.clear",
+        targetName: student.name,
+        subjectName: lesson.subject.name,
+        details:
+          `${lessonRef(lesson.subject.name, lesson.date)}: клетка очищена, ` +
+          `удалено ${count} ${pluralize(count, "оценка", "оценки", "оценок")}`,
+      });
+    }
 
     revalidatePath("/journal");
     revalidatePath("/student");

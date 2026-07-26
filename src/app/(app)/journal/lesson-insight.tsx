@@ -10,6 +10,12 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/field";
 import { setLessonHomeworkAction, setLessonPlanAction } from "@/lib/actions/lessons";
 import {
+  MASTERY_LEVEL_KEYS,
+  MASTERY_LEVELS,
+  masteryColorClasses,
+  type GradelessColumnAnalysis,
+} from "@/lib/gradeless";
+import {
   averageColorClasses,
   formatAverage,
   gradeColorClasses,
@@ -19,7 +25,7 @@ import {
   QUALITY_MIN_GRADE,
   type LessonAnalysis,
 } from "@/lib/grades";
-import { cn, formatDateShort, shortName } from "@/lib/utils";
+import { cn, formatDateShort, pluralize, shortName } from "@/lib/utils";
 
 /**
  * Единая панель урока, открывается кликом по дате столбца (десктоп) или
@@ -37,6 +43,7 @@ export function LessonInsight({
   canEdit,
   origin,
   analysis,
+  gradelessAnalysis,
   onFlash,
   onClose,
 }: {
@@ -45,8 +52,16 @@ export function LessonInsight({
   canEdit: boolean;
   /** Координаты якоря у столбца (десктоп) или null — нижний лист (телефон). */
   origin: { x: number; y: number } | null;
-  /** Анализ столбца по live-данным грида (analyzeLessonColumn). */
-  analysis: LessonAnalysis;
+  /**
+   * Анализ ОЦЕНОЧНЫХ строк столбца (analyzeLessonColumn); null — в журнале
+   * нет оценочных учеников (чисто безотметочный класс).
+   */
+  analysis: LessonAnalysis | null;
+  /**
+   * Анализ БЕЗОТМЕТОЧНЫХ строк (analyzeGradelessColumn): полосы уровней и
+   * печати вместо гистограммы 1–10; null — безотметочных учеников нет.
+   */
+  gradelessAnalysis: GradelessColumnAnalysis | null;
   onFlash: (tone: "success" | "error", text: string) => void;
   onClose: () => void;
 }) {
@@ -101,7 +116,9 @@ export function LessonInsight({
 
   if (!mounted) return null;
 
-  const total = analysis.gradedCount + analysis.absentNames.length + analysis.emptyNames.length;
+  const total = analysis
+    ? analysis.gradedCount + analysis.absentNames.length + analysis.emptyNames.length
+    : 0;
   const homeworkUnchanged = draft.trim() === (lesson.homework ?? "");
 
   function saveHomework() {
@@ -135,6 +152,7 @@ export function LessonInsight({
   }
 
   function buildSummary(): string {
+    if (!analysis) return "";
     const distributionParts: string[] = [];
     for (let value = MAX_GRADE; value >= MIN_GRADE; value -= 1) {
       const count = analysis.distribution[value - 1] ?? 0;
@@ -164,7 +182,15 @@ export function LessonInsight({
     }
   }
 
-  const maxCount = Math.max(...analysis.distribution, 1);
+  const maxCount = analysis ? Math.max(...analysis.distribution, 1) : 1;
+  const gradelessMarkedTotal = gradelessAnalysis
+    ? gradelessAnalysis.markedCount +
+      gradelessAnalysis.absentNames.length +
+      gradelessAnalysis.emptyNames.length
+    : 0;
+  const gradelessMaxLevel = gradelessAnalysis
+    ? Math.max(...MASTERY_LEVEL_KEYS.map((level) => gradelessAnalysis.levelCounts[level]), 1)
+    : 1;
 
   const content = (
     <>
@@ -241,7 +267,8 @@ export function LessonInsight({
           )}
         </div>
 
-        {/* ── Блок «Анализ»: распределение, средний, качество/успеваемость ── */}
+        {/* ── Блок «Анализ» оценочных строк: распределение, средний, % ────── */}
+        {analysis && (
         <div className="space-y-2.5 px-3 py-2.5">
           <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
             Анализ урока
@@ -337,6 +364,77 @@ export function LessonInsight({
             </>
           )}
         </div>
+        )}
+
+        {/* ── Безотметочные строки: полосы уровней и печати вместо гистограммы
+            1–10 и процентов — «среднего уровня класса» не существует ───────── */}
+        {gradelessAnalysis && (
+          <div
+            className={cn("space-y-2.5 px-3 py-2.5", analysis && "border-t border-rule")}
+          >
+            <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+              {analysis ? "Безотметочные ученики" : "Анализ урока"}
+            </p>
+
+            {gradelessAnalysis.markedCount === 0 && gradelessAnalysis.stampCount === 0 ? (
+              <p className="text-xs text-muted-foreground">
+                На этом уроке ещё нет отметок — отметьте уровень освоения (клавиши 1·2·3)
+                или выдайте печать, и появится сводка.
+              </p>
+            ) : (
+              <>
+                <div className="space-y-1">
+                  {MASTERY_LEVEL_KEYS.map((level) => {
+                    const count = gradelessAnalysis.levelCounts[level];
+                    return (
+                      <div key={level} className="flex items-center gap-2 text-xs">
+                        <span className="w-24 shrink-0 text-muted-foreground">
+                          {MASTERY_LEVELS[level].glyph} {MASTERY_LEVELS[level].label}
+                        </span>
+                        <div className="h-4 flex-1 overflow-hidden rounded-sm bg-secondary">
+                          {count > 0 && (
+                            <div
+                              className={cn("h-full rounded-sm", masteryColorClasses(level))}
+                              style={{
+                                width: `${Math.round((count / gradelessMaxLevel) * 100)}%`,
+                              }}
+                            />
+                          )}
+                        </div>
+                        <span className="w-5 shrink-0 text-right font-semibold tabular-nums">
+                          {count}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                <div className="space-y-1 text-xs">
+                  <p>
+                    Отмечено{" "}
+                    <span className="font-semibold tabular-nums">
+                      {gradelessAnalysis.markedCount}
+                    </span>{" "}
+                    из <span className="font-semibold tabular-nums">{gradelessMarkedTotal}</span>
+                    <span aria-hidden> · </span>
+                    {gradelessAnalysis.stampCount}{" "}
+                    {pluralize(gradelessAnalysis.stampCount, "печать", "печати", "печатей")}
+                  </p>
+                  {gradelessAnalysis.absentNames.length > 0 && (
+                    <p className="text-muted-foreground">
+                      «Н»: {gradelessAnalysis.absentNames.map(shortName).join(", ")}
+                    </p>
+                  )}
+                  {gradelessAnalysis.emptyNames.length > 0 && (
+                    <p className="text-muted-foreground">
+                      Без отметки: {gradelessAnalysis.emptyNames.map(shortName).join(", ")}
+                    </p>
+                  )}
+                </div>
+              </>
+            )}
+          </div>
+        )}
       </div>
 
       <div className="border-t border-rule p-2">

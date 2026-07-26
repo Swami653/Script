@@ -135,6 +135,8 @@ export default async function ResultsPage({ searchParams }: { searchParams: Sear
               date: control.date.toISOString(),
             })),
           })),
+          gradelessRows: review.gradelessRows,
+          noteCoverage: review.noteCoverage,
           classAverage: review.classAverage,
           summary: review.summary,
         }}

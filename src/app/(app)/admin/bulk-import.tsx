@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button";
 import { FieldHint, Input, Label, Textarea } from "@/components/ui/field";
 import { bulkImportStudentsAction, type BulkImportResult } from "@/lib/actions/users";
 import { downloadCsv, toCsv } from "@/lib/csv";
+import { isGradelessClassName } from "@/lib/gradeless";
 import { parseStudentNames } from "@/lib/students-import";
 
 const PLACEHOLDER = `Иванов Иван Иванович
@@ -103,6 +104,13 @@ export function BulkImportStudents() {
 
           <FieldHint className="order-last w-full">
             Класс указывать не обязательно — его можно проставить позже.
+            {/* Тот же предикат, что запрещает оценки на сервере */}
+            {isGradelessClassName(className) && (
+              <span className="mt-0.5 block font-medium text-primary">
+                {className.trim()} — 1–2 класс: безотметочное обучение, печати и уровни
+                вместо оценок.
+              </span>
+            )}
           </FieldHint>
 
           <Button type="submit" loading={pending} disabled={preview.length === 0}>

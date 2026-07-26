@@ -29,6 +29,12 @@ export const AUDIT_ACTIONS = [
   "debt.set",
   "debt.clear",
   "backup.download",
+  "stamp.set",
+  "stamp.remove",
+  "mastery.set",
+  "mastery.clear",
+  "note.save",
+  "note.delete",
 ] as const;
 
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];
@@ -56,6 +62,12 @@ export const AUDIT_ACTION_LABELS: Record<AuditAction, string> = {
   "debt.set": "Долг отмечен",
   "debt.clear": "Долг снят",
   "backup.download": "Резервная копия скачана",
+  "stamp.set": "Печать поставлена",
+  "stamp.remove": "Печать снята",
+  "mastery.set": "Уровень освоения",
+  "mastery.clear": "Уровень снят",
+  "note.save": "Характеристика за четверть",
+  "note.delete": "Характеристика удалена",
 };
 
 export function isAuditAction(value: unknown): value is AuditAction {

@@ -4,6 +4,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 
 import { requirePageUser } from "@/lib/auth-guards";
+import { formatLevelCounts } from "@/lib/gradeless";
 import {
   averageColorClasses,
   formatAverage,
@@ -13,7 +14,9 @@ import {
   QUARTER_LABELS,
 } from "@/lib/grades";
 import { GradeChip } from "@/components/grade-chip";
+import { LevelChip } from "@/components/level-chip";
 import { QuarterSparkline } from "@/components/sparkline";
+import { StampSealMini } from "@/components/stamp-seal";
 import { Badge } from "@/components/ui/badge";
 import { getStudentSubjectDetail } from "@/lib/queries";
 import { formatYear, getActiveYear } from "@/lib/school-year";
@@ -95,38 +98,73 @@ export default async function StudentSubjectPage({
           </h1>
           <p className="mt-1 text-sm text-muted-foreground">
             {detail.student.name}
-            {detail.student.className ? ` · ${detail.student.className}` : ""} · оценок:{" "}
-            {detail.totalGrades}
+            {detail.student.className ? ` · ${detail.student.className}` : ""}
+            {detail.assessment === "gradeless"
+              ? ` · печатей: ${detail.totalStamps}`
+              : ` · оценок: ${detail.totalGrades}`}
             {detail.totalAbsences > 0 && ` · пропусков: ${detail.totalAbsences}`}
           </p>
         </div>
 
-        <dl className="flex items-end gap-6">
-          {QUARTERS.map((quarter) => (
-            <div key={quarter} className="text-center">
-              <dt className="text-[11px] text-muted-foreground">{quarter} четв.</dt>
-              <dd
-                className={cn(
-                  "text-lg font-bold tabular-nums",
-                  averageColorClasses(detail.quarterAverages[quarter - 1] ?? null),
-                )}
-              >
-                {formatAverage(detail.quarterAverages[quarter - 1] ?? null)}
+        {/* Шапка: у безотметочного (1–2 класс) вместо средних — сводки уровней
+            по четвертям; средних и годовой у него НЕ СУЩЕСТВУЕТ */}
+        {detail.assessment === "gradeless" ? (
+          <dl className="flex items-end gap-6">
+            {QUARTERS.map((quarter) => {
+              const counts = detail.masteryByQuarter[quarter - 1] ?? {
+                high: 0,
+                medium: 0,
+                low: 0,
+              };
+              const line = formatLevelCounts(counts);
+              return (
+                <div key={quarter} className="text-center">
+                  <dt className="text-[11px] text-muted-foreground">{quarter} четв.</dt>
+                  <dd
+                    className="text-sm font-bold tabular-nums"
+                    title="Уровни: усвоил · усваивает · нужна помощь"
+                  >
+                    {line || <span className="text-muted-foreground">—</span>}
+                  </dd>
+                </div>
+              );
+            })}
+            <div className="border-l border-rule pl-6 text-center">
+              <dt className="text-[11px] text-muted-foreground">Печатей</dt>
+              <dd className="flex items-center justify-center gap-1 text-lg font-bold tabular-nums text-primary">
+                <StampSealMini kind={null} seed={detail.subject.id} />
+                {detail.totalStamps}
               </dd>
             </div>
-          ))}
-          <div className="border-l border-rule pl-6 text-center">
-            <dt className="text-[11px] text-muted-foreground">Год</dt>
-            <dd
-              className={cn(
-                "inline-flex h-9 w-11 items-center justify-center rounded text-lg font-bold tabular-nums",
-                gradeColorClasses(detail.year),
-              )}
-            >
-              {detail.year ?? "—"}
-            </dd>
-          </div>
-        </dl>
+          </dl>
+        ) : (
+          <dl className="flex items-end gap-6">
+            {QUARTERS.map((quarter) => (
+              <div key={quarter} className="text-center">
+                <dt className="text-[11px] text-muted-foreground">{quarter} четв.</dt>
+                <dd
+                  className={cn(
+                    "text-lg font-bold tabular-nums",
+                    averageColorClasses(detail.quarterAverages[quarter - 1] ?? null),
+                  )}
+                >
+                  {formatAverage(detail.quarterAverages[quarter - 1] ?? null)}
+                </dd>
+              </div>
+            ))}
+            <div className="border-l border-rule pl-6 text-center">
+              <dt className="text-[11px] text-muted-foreground">Год</dt>
+              <dd
+                className={cn(
+                  "inline-flex h-9 w-11 items-center justify-center rounded text-lg font-bold tabular-nums",
+                  gradeColorClasses(detail.year),
+                )}
+              >
+                {detail.year ?? "—"}
+              </dd>
+            </div>
+          </dl>
+        )}
       </header>
 
       {/* Впереди: аннотированные будущие уроки — к чему готовиться */}
@@ -169,7 +207,8 @@ export default async function StudentSubjectPage({
         </section>
       )}
 
-      {detail.totalGrades > 0 && (
+      {/* Спарклайн средних у безотметочного скрыт: средних не существует */}
+      {detail.assessment === "graded" && detail.totalGrades > 0 && (
         <section className="rounded-lg border border-rule-strong bg-card p-4">
           <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-muted-foreground">
             Динамика по четвертям
@@ -181,6 +220,10 @@ export default async function StudentSubjectPage({
       {QUARTERS.map((quarter) => {
         const rows = detail.byQuarter[quarter - 1] ?? [];
         if (rows.length === 0) return null;
+        const note = detail.notesByQuarter[quarter - 1] ?? null;
+        const levelLine = formatLevelCounts(
+          detail.masteryByQuarter[quarter - 1] ?? { high: 0, medium: 0, low: 0 },
+        );
 
         return (
           <section key={quarter}>
@@ -188,15 +231,34 @@ export default async function StudentSubjectPage({
               <span className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">
                 {QUARTER_LABELS[quarter]}
               </span>
-              <span
-                className={cn(
-                  "text-sm font-semibold tabular-nums",
-                  averageColorClasses(detail.quarterAverages[quarter - 1] ?? null),
-                )}
-              >
-                средний {formatAverage(detail.quarterAverages[quarter - 1] ?? null)}
-              </span>
+              {detail.assessment === "gradeless" ? (
+                <span
+                  className="text-sm font-semibold tabular-nums"
+                  title="Уровни: усвоил · усваивает · нужна помощь"
+                >
+                  {levelLine || " "}
+                </span>
+              ) : (
+                <span
+                  className={cn(
+                    "text-sm font-semibold tabular-nums",
+                    averageColorClasses(detail.quarterAverages[quarter - 1] ?? null),
+                  )}
+                >
+                  средний {formatAverage(detail.quarterAverages[quarter - 1] ?? null)}
+                </span>
+              )}
             </h2>
+
+            {/* Характеристика четверти — словесный итог вместо отметки */}
+            {note && (
+              <p className="mb-2 rounded-lg border border-rule-strong bg-secondary/40 px-3 py-2 text-sm italic">
+                <span className="not-italic text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                  От учителя:{" "}
+                </span>
+                {note}
+              </p>
+            )}
 
             <ul className="divide-y divide-rule overflow-hidden rounded-lg border border-rule-strong bg-card">
               {rows.map((row) => (
@@ -204,7 +266,8 @@ export default async function StudentSubjectPage({
                   key={row.lessonId}
                   className={cn(
                     "flex items-start gap-3 px-3 py-2.5",
-                    row.grades.length === 0 && "bg-secondary/30",
+                    row.grades.length === 0 && !row.mastery && row.stamps.length === 0 &&
+                      "bg-secondary/30",
                   )}
                 >
                   <span className="w-28 shrink-0 pt-0.5 text-xs tabular-nums text-muted-foreground">
@@ -239,17 +302,40 @@ export default async function StudentSubjectPage({
                       >
                         Н
                       </span>
-                    ) : row.grades.length === 0 ? (
-                      <span className="text-xs text-muted-foreground">без оценки</span>
                     ) : (
-                      row.grades.map((grade, index) => (
-                        <GradeChip
-                          key={index}
-                          value={grade.value}
-                          kind={grade.kind}
-                          comment={grade.comment}
-                        />
-                      ))
+                      <>
+                        {/* Уровень освоения — чип-слово, НИКОГДА не буква «Н» */}
+                        {row.mastery && (
+                          <LevelChip
+                            level={row.mastery.level}
+                            comment={row.mastery.comment}
+                          />
+                        )}
+                        {row.grades.map((grade, index) => (
+                          <GradeChip
+                            key={index}
+                            value={grade.value}
+                            kind={grade.kind}
+                            comment={grade.comment}
+                          />
+                        ))}
+                        {row.stamps.length > 0 && (
+                          <span className="flex flex-col gap-0.5" title="Печати за урок">
+                            {row.stamps.map((kind, index) => (
+                              <StampSealMini
+                                key={index}
+                                kind={kind}
+                                seed={`${row.lessonId}-${index}`}
+                              />
+                            ))}
+                          </span>
+                        )}
+                        {!row.mastery && row.grades.length === 0 && row.stamps.length === 0 && (
+                          <span className="text-xs text-muted-foreground">
+                            {detail.assessment === "gradeless" ? "без отметки" : "без оценки"}
+                          </span>
+                        )}
+                      </>
                     )}
                   </span>
                 </li>
@@ -268,8 +354,12 @@ export default async function StudentSubjectPage({
                 тогда обещать «как только учитель добавит урок» нельзя: он их
                 уже добавил, просто они ещё не прошли. */}
             {detail.upcoming.length > 0
-              ? "Уроки уже запланированы — оценки появятся после первого урока."
-              : "Как только учитель добавит урок, он появится здесь вместе с темой и оценкой."}
+              ? detail.assessment === "gradeless"
+                ? "Уроки уже запланированы — отметки учителя появятся после первого урока."
+                : "Уроки уже запланированы — оценки появятся после первого урока."
+              : detail.assessment === "gradeless"
+                ? "Как только учитель добавит урок, он появится здесь вместе с темой и отметкой."
+                : "Как только учитель добавит урок, он появится здесь вместе с темой и оценкой."}
           </p>
         </div>
       )}

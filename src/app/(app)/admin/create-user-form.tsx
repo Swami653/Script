@@ -8,6 +8,7 @@ import { Flash, useFlash } from "@/components/flash";
 import { Button } from "@/components/ui/button";
 import { FieldHint, Input, Label, Select } from "@/components/ui/field";
 import { createUserAction } from "@/lib/actions/users";
+import { isGradelessClassName } from "@/lib/gradeless";
 import { ROLE_LABELS, ROLES } from "@/lib/roles";
 
 /** Пароль без похожих символов — его придётся диктовать вслух. */
@@ -128,6 +129,13 @@ export function CreateUserForm() {
               placeholder="9-А"
               maxLength={20}
             />
+            {/* Тот же предикат, что запрещает оценки на сервере: админ видит
+                до сохранения, что класс станет безотметочным */}
+            {isGradelessClassName(form.className) && (
+              <FieldHint>
+                1–2 класс — безотметочное обучение: печати и уровни вместо оценок.
+              </FieldHint>
+            )}
           </div>
         )}
       </div>

@@ -2,6 +2,7 @@ import { NextResponse, type NextRequest } from "next/server";
 
 import { ForbiddenError, requireRole, UnauthorizedError } from "@/lib/auth-guards";
 import { toCsv, withBom } from "@/lib/csv";
+import { MASTERY_LEVELS } from "@/lib/gradeless";
 import { formatAverage, isValidQuarter, type Quarter } from "@/lib/grades";
 import { prisma } from "@/lib/prisma";
 import { getJournalData } from "@/lib/queries";
@@ -42,13 +43,19 @@ export async function GET(request: NextRequest) {
 
     const quarter = quarterParam as Quarter;
     const year = Number.isInteger(yearParam) ? yearParam : await getActiveYear();
-    const [data, lock] = await Promise.all([
+    const [data, lock, notes] = await Promise.all([
       getJournalData(subjectId, quarter, year, className),
       prisma.quarterLock.findUnique({
         where: { subjectId_year_quarter: { subjectId, year, quarter } },
         select: { id: true },
       }),
+      // Характеристики четверти (безотметочные 1–2 классы) — колонка в конце.
+      prisma.quarterNote.findMany({
+        where: { subjectId, year, quarter },
+        select: { studentId: true, text: true },
+      }),
     ]);
+    const noteByStudent = new Map(notes.map((note) => [note.studentId, note.text]));
 
     // Четверть закрыта — добавляется колонка «Итог» с официальной отметкой из
     // снимка-ведомости («н/а» для неаттестованных). «Средний» остаётся живым.
@@ -63,6 +70,8 @@ export async function GET(request: NextRequest) {
         )
       : null;
 
+    // Колонка «Характеристика» добавляется ВСЕГДА (у оценочных пустая):
+    // стабильный набор колонок не ломает смешанный экспорт нескольких классов.
     const headers = [
       "Ученик",
       "Класс",
@@ -70,29 +79,55 @@ export async function GET(request: NextRequest) {
       `Средний за ${quarter} четв.`,
       ...(finals ? ["Итог"] : []),
       "Годовая",
+      "Характеристика",
     ];
 
-    const rows = data.rows.map((row) => [
-      row.student.name,
-      row.student.className ?? "",
-      // «Н» для отсутствия, «10/9» для двух оценок — как в журнале.
-      ...data.lessons.map((lesson) => {
-        if (row.absentLessons.includes(lesson.id)) return "Н";
-        return (row.cells[lesson.id] ?? [])
-          .sort((a, b) => a.slot - b.slot)
-          .map((grade) => grade.value)
-          .join("/");
-      }),
-      formatAverage(row.average),
-      /* «н/а» — только тем, кто в ведомости ЕСТЬ, но без отметки. Кого в снимке
-         нет вовсе (предмет не изучает либо заведён после закрытия) — пустая
-         клетка: печатный документ не должен утверждать, что ученик не
-         аттестован по предмету, которого у него не было. */
-      ...(finals
-        ? [finals.has(row.student.id) ? (finals.get(row.student.id) ?? "н/а") : ""]
-        : []),
-      row.year ?? "",
-    ]);
+    const rows = data.rows.map((row) => {
+      // Безотметочная строка (1–2 класс): в клетках — ПОЛНЫЕ слова уровней
+      // («нужна помощь», никогда одиночная «Н» — она занята отсутствием),
+      // печати — суффикс « +N»; итоговые колонки — «б/о».
+      if (row.assessment === "gradeless") {
+        return [
+          row.student.name,
+          row.student.className ?? "",
+          ...data.lessons.map((lesson) => {
+            if (row.absentLessons.includes(lesson.id)) return "Н";
+            const level = row.mastery[lesson.id]?.level ?? null;
+            const stampCount = (row.stamps[lesson.id] ?? []).length;
+            const word = level ? MASTERY_LEVELS[level].label.toLowerCase() : "";
+            const suffix = stampCount > 0 ? `+${stampCount}` : "";
+            return [word, suffix].filter(Boolean).join(" ");
+          }),
+          "б/о",
+          ...(finals ? ["б/о"] : []),
+          "б/о",
+          noteByStudent.get(row.student.id) ?? "",
+        ];
+      }
+
+      return [
+        row.student.name,
+        row.student.className ?? "",
+        // «Н» для отсутствия, «10/9» для двух оценок — как в журнале.
+        ...data.lessons.map((lesson) => {
+          if (row.absentLessons.includes(lesson.id)) return "Н";
+          return (row.cells[lesson.id] ?? [])
+            .sort((a, b) => a.slot - b.slot)
+            .map((grade) => grade.value)
+            .join("/");
+        }),
+        formatAverage(row.average),
+        /* «н/а» — только тем, кто в ведомости ЕСТЬ, но без отметки. Кого в снимке
+           нет вовсе (предмет не изучает либо заведён после закрытия) — пустая
+           клетка: печатный документ не должен утверждать, что ученик не
+           аттестован по предмету, которого у него не было. */
+        ...(finals
+          ? [finals.has(row.student.id) ? (finals.get(row.student.id) ?? "н/а") : ""]
+          : []),
+        row.year ?? "",
+        "",
+      ];
+    });
 
     const csv = withBom(toCsv(headers, rows));
     const filename = `journal-${subject.name}-${year}-q${quarter}.csv`.replace(/\s+/g, "-");

@@ -65,6 +65,14 @@ model User {
   /// Отметки отсутствия — как у ученика, так и проставленные учителем.
   absences        Absence[] @relation("StudentAbsences")
   absencesMarked  Absence[] @relation("TeacherAbsences")
+  /// Безотметочное обучение (1–2 классы): печати, уровни, характеристики —
+  /// как у ученика и как у выдавшего их учителя.
+  stamps            LessonStamp[] @relation("StudentStamps")
+  stampsGiven       LessonStamp[] @relation("TeacherStamps")
+  masteryMarks      MasteryMark[] @relation("StudentMastery")
+  masteryGiven      MasteryMark[] @relation("TeacherMastery")
+  quarterNotes      QuarterNote[] @relation("StudentNotes")
+  quarterNotesGiven QuarterNote[] @relation("TeacherNotes")
   /// Уроки, созданные пользователем как учителем.
   lessonsTaught Lesson[] @relation("TeacherLessons")
 
@@ -82,6 +90,8 @@ model Subject {
   grades       Grade[]
   /// Замки закрытых четвертей этого предмета.
   quarterLocks QuarterLock[]
+  /// Словесные характеристики за четверть (безотметочные 1–2 классы).
+  quarterNotes QuarterNote[]
 }
 
 /// Урок = один столбец в журнале: предмет + дата + четверть (+ тема).
@@ -115,6 +125,9 @@ model Lesson {
   grades   Grade[]
   absences Absence[]
   debts    Debt[]
+  /// Безотметочные отметки урока (1–2 классы): печати и уровни освоения.
+  stamps       LessonStamp[]
+  masteryMarks MasteryMark[]
 
   // Уникальность «один урок на дату по предмету» действует только для живых
   // уроков и живёт в частичном SQL-индексе Lesson_subjectId_date_live_key
@@ -283,6 +296,11 @@ model QuarterResult {
   finalGrade   Int?
   gradeCount   Int
   absenceCount Int
+  /// true — строка безотметочного ученика (1–2 класс): в ведомости «б/о», не «н/а».
+  gradeless    Boolean     @default(false)
+  /// Снимок словесной характеристики на момент закрытия. Документ БЕЗ связи с
+  /// живой QuarterNote: переоткрытие удаляет снимок, характеристика остаётся.
+  note         String?
   createdAt    DateTime    @default(now())
 
   @@unique([lockId, studentId])
@@ -313,4 +331,100 @@ model Debt {
   @@unique([studentId, lessonId])
   @@index([subjectId, year, quarter])
   @@index([studentId, year])
+}
+
+/// Печать-поощрение за урок (безотметочные 1–2 классы): «Молодец», «Старание»…
+/// Печать — НЕ оценка и НИКОГДА не входит в средние баллы. Словарь значений
+/// kind — STAMP_KINDS в src/lib/gradeless.ts (без CHECK: словарь расширяемый,
+/// прецедент Grade.kind). До MAX_STAMPS_PER_LESSON печатей за урок, каждый
+/// вид — один раз (@@unique). subjectId — денормализованный скаляр БЕЗ FK
+/// (прецедент Absence/Debt: каскад чистки идёт цепочкой LessonStamp -> Lesson).
+/// ИНВАРИАНТ: subjectId/year/quarter всегда равны полям урока, заполняются
+/// только из lesson (см. src/lib/actions/gradeless.ts).
+model LessonStamp {
+  id   String @id @default(cuid())
+  kind String
+
+  studentId String
+  student   User   @relation("StudentStamps", fields: [studentId], references: [id], onDelete: Cascade)
+
+  lessonId String
+  lesson   Lesson @relation(fields: [lessonId], references: [id], onDelete: Cascade)
+
+  subjectId String
+  year      Int
+  quarter   Int
+
+  teacherId String?
+  teacher   User?   @relation("TeacherStamps", fields: [teacherId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+
+  // CHECK "quarter" BETWEEN 1 AND 4 живёт только в SQL (migrations/8_gradeless):
+  // Prisma CHECK-и не описывает — прецедент миграции 7.
+  @@unique([studentId, lessonId, kind])
+  @@index([studentId, year])
+  @@index([studentId, subjectId, year, quarter])
+  @@index([subjectId, year, quarter])
+}
+
+/// Уровень освоения за урок (безотметочные 1–2 классы) ВМЕСТО оценки:
+/// high / medium / low — словарь MASTERY_LEVELS в src/lib/gradeless.ts.
+/// Уровень — НЕ оценка: числового значения не имеет и НИКОГДА не входит в
+/// средние баллы. Один на клетку (слотов «10/9» у качественной отметки нет).
+/// subjectId — скаляр без FK (прецедент Absence); ИНВАРИАНТ: subjectId/year/
+/// quarter всегда из урока. CHECK-и уровня и четверти — только в SQL.
+model MasteryMark {
+  id      String  @id @default(cuid())
+  level   String
+  comment String?
+
+  studentId String
+  student   User   @relation("StudentMastery", fields: [studentId], references: [id], onDelete: Cascade)
+
+  lessonId String
+  lesson   Lesson @relation(fields: [lessonId], references: [id], onDelete: Cascade)
+
+  subjectId String
+  year      Int
+  quarter   Int
+
+  teacherId String?
+  teacher   User?   @relation("TeacherMastery", fields: [teacherId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([studentId, lessonId])
+  @@index([studentId, subjectId, year, quarter])
+  @@index([subjectId, year, quarter])
+}
+
+/// Словесная характеристика за четверть по предмету (безотметочные 1–2 классы).
+/// К уроку не привязана: год/четверть — первичное измерение, поэтому у subjectId
+/// есть FK (каскад чистки предмета — урока-посредника нет). Не оценка, в средние
+/// не входит. Замок четверти проверяется через assertQuarterOpen (у действия нет
+/// урока для requireWritableLesson). CHECK четверти — только в SQL.
+model QuarterNote {
+  id   String @id @default(cuid())
+  text String
+
+  studentId String
+  student   User   @relation("StudentNotes", fields: [studentId], references: [id], onDelete: Cascade)
+
+  subjectId String
+  subject   Subject @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+
+  year    Int
+  quarter Int
+
+  teacherId String?
+  teacher   User?   @relation("TeacherNotes", fields: [teacherId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([studentId, subjectId, year, quarter])
+  @@index([studentId, year])
+  @@index([subjectId, year, quarter])
 }

@@ -2,7 +2,7 @@ import { BookOpen, ClipboardList } from "lucide-react";
 import type { Metadata } from "next";
 import Link from "next/link";
 
-import { JournalGrid } from "@/app/(app)/journal/journal-grid";
+import { JournalGrid, type GridMode } from "@/app/(app)/journal/journal-grid";
 import { JournalToolbar } from "@/app/(app)/journal/journal-toolbar";
 import { ClosedStamp } from "@/components/closed-stamp";
 import { requirePageRole } from "@/lib/auth-guards";
@@ -102,6 +102,22 @@ export default async function JournalPage({ searchParams }: { searchParams: Sear
     className ? `&class=${encodeURIComponent(className)}` : ""
   }`;
 
+  /**
+   * Режим экрана по составу строк: чисто оценочный, чисто безотметочный
+   * (1–2 класс) или смешанный (без фильтра класса). Каждая строка сетки всё
+   * равно рендерится по СВОЕМУ assessment — режим управляет только общими
+   * элементами: шапкой, подсказками, итоговыми графами и подвалом.
+   */
+  const hasGraded = data.rows.some((row) => row.assessment === "graded");
+  const hasGradeless = data.rows.some((row) => row.assessment === "gradeless");
+  const mode: GridMode = hasGraded && hasGradeless ? "mixed" : hasGradeless ? "gradeless" : "graded";
+
+  /** Печатей за выбранную четверть — сводка шапки безотметочного класса. */
+  const quarterStamps = data.rows.reduce(
+    (sum, row) => sum + Object.values(row.stamps).reduce((n, list) => n + list.length, 0),
+    0,
+  );
+
   // «Четверть закончилась — пора подвести итоги»: период прошёл, замка нет, уроки есть.
   const quarterEnded = Boolean(period && period.endDate < todayUtcMidnight());
   const showCloseBanner = !lock && quarterEnded && data.lessons.length > 0;
@@ -134,14 +150,22 @@ export default async function JournalPage({ searchParams }: { searchParams: Sear
             {pluralize(data.lessons.length, "урок", "урока", "уроков")}
           </span>
           <span aria-hidden>·</span>
-          <span>
-            средний балл класса{" "}
-            <span
-              className={`font-semibold tabular-nums ${averageColorClasses(data.classAverage)}`}
-            >
-              {formatAverage(data.classAverage)}
+          {mode === "gradeless" ? (
+            /* У безотметочного класса среднего не существует — считаем печати */
+            <span>
+              безотметочный класс · печатей за четверть:{" "}
+              <span className="font-semibold tabular-nums text-foreground">{quarterStamps}</span>
             </span>
-          </span>
+          ) : (
+            <span>
+              {mode === "mixed" ? "средний по оценочным ученикам" : "средний балл класса"}{" "}
+              <span
+                className={`font-semibold tabular-nums ${averageColorClasses(data.classAverage)}`}
+              >
+                {formatAverage(data.classAverage)}
+              </span>
+            </span>
+          )}
           <span aria-hidden>·</span>
           <Link
             href={resultsHref}
@@ -193,16 +217,21 @@ export default async function JournalPage({ searchParams }: { searchParams: Sear
         locked={Boolean(lock)}
         lockedQuarters={lockedQuarters}
         askMode={askMode}
+        mode={mode}
         topicSuggestions={topicSuggestions}
         lessons={data.lessons.map((lesson) => ({
           id: lesson.id,
           date: lesson.date.toISOString(),
           topic: lesson.topic,
         }))}
-        students={data.rows.map((row) => ({
-          id: row.student.id,
-          name: row.student.name,
-        }))}
+        students={data.rows
+          /* Массовое выставление — только оценочным: батч с безотметочным
+             сервер отклоняет целиком (409), предлагать его бессмысленно */
+          .filter((row) => row.assessment === "graded")
+          .map((row) => ({
+            id: row.student.id,
+            name: row.student.name,
+          }))}
       />
 
       <JournalGrid
@@ -210,6 +239,7 @@ export default async function JournalPage({ searchParams }: { searchParams: Sear
         quarter={quarter}
         subjectName={subjectName}
         askMode={askMode}
+        mode={mode}
         lessons={data.lessons.map((lesson) => ({
           id: lesson.id,
           date: lesson.date.toISOString(),
@@ -221,6 +251,7 @@ export default async function JournalPage({ searchParams }: { searchParams: Sear
           studentId: row.student.id,
           name: row.student.name,
           className: row.student.className,
+          assessment: row.assessment,
           cells: Object.fromEntries(
             Object.entries(row.cells).map(([lessonId, grades]) => [
               lessonId,
@@ -234,6 +265,9 @@ export default async function JournalPage({ searchParams }: { searchParams: Sear
                 })),
             ]),
           ),
+          mastery: row.mastery,
+          stamps: row.stamps,
+          stampsYearTotal: row.stampsYearTotal,
           absentLessons: row.absentLessons,
           openDebts: Object.fromEntries(
             row.openDebts.map((debt) => [debt.lessonId, debt.debtId]),

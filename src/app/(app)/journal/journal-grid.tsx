@@ -17,9 +17,17 @@ import { createPortal } from "react-dom";
 
 import { AttendanceSheet } from "@/app/(app)/journal/attendance-sheet";
 import { LessonInsight } from "@/app/(app)/journal/lesson-insight";
+import { LevelPicker } from "@/app/(app)/journal/level-picker";
 import { Flash, useFlash } from "@/components/flash";
+import { StampSealMini } from "@/components/stamp-seal";
 import { Button } from "@/components/ui/button";
 import { clearDebtAction, markDebtAction } from "@/lib/actions/debts";
+import {
+  clearMasteryAction,
+  removeStampAction,
+  setMasteryAction,
+  setStampAction,
+} from "@/lib/actions/gradeless";
 import {
   clearAbsenceAction,
   clearCellAction,
@@ -34,6 +42,18 @@ import {
   NOT_ASKED_WINDOW,
   pickAskCandidates,
 } from "@/lib/ask-candidates";
+import {
+  analyzeGradelessColumn,
+  MASTERY_LEVEL_KEYS,
+  MASTERY_LEVELS,
+  MAX_STAMPS_PER_LESSON,
+  masteryColorClasses,
+  STAMP_KIND_KEYS,
+  STAMP_KINDS,
+  type Assessment,
+  type MasteryLevel,
+  type StampKind,
+} from "@/lib/gradeless";
 import {
   analyzeLessonColumn,
   averageColorClasses,
@@ -80,11 +100,25 @@ export type GridGrade = {
   comment: string | null;
 };
 
+/** Уровень освоения клетки безотметочной строки. */
+export type GridMastery = { level: MasteryLevel; comment: string | null };
+
+/** Режим экрана: все строки оценочные, все безотметочные или смесь классов. */
+export type GridMode = "graded" | "gradeless" | "mixed";
+
 export type GridRow = {
   studentId: string;
   name: string;
   className: string | null;
+  /** Система оценивания строки — каждая строка рендерится по СВОЕЙ. */
+  assessment: Assessment;
   cells: Record<string, GridGrade[]>;
+  /** lessonId -> уровень освоения (безотметочные 1–2 классы). */
+  mastery: Record<string, GridMastery>;
+  /** lessonId -> печати клетки; null — неизвестный вид (рисуется «Печатью»). */
+  stamps: Record<string, (StampKind | null)[]>;
+  /** Печатей за ГОД — колонка «Печати» безотметочной строки. */
+  stampsYearTotal: number;
   /** lessonId, где у ученика отмечено «Н» */
   absentLessons: string[];
   /**
@@ -117,6 +151,12 @@ function makeGrade(value: number, kind: GradeKind): GridGrade {
  *   Shift + цифра  — вторая оценка в клетке
  *   Enter / клик   — окно с типом работы, комментарием и отметкой «Н»
  *   Delete         — убрать оценку (Shift+Delete — очистить клетку)
+ *
+ * БЕЗОТМЕТОЧНАЯ строка (1–2 класс, per-row по assessment): вместо оценок —
+ * уровень освоения (клавиши 1=усвоил, 2=усваивает, 3=нужна помощь; коммит
+ * немедленный, хак «отложенной единицы» не нужен — двузначных значений нет),
+ * до двух печатей-поощрений; клик открывает LevelPicker вместо GradePicker.
+ * «Н» универсальна. Уровень НИКОГДА не рендерится буквой «Н».
  */
 export function JournalGrid({
   lessons,
@@ -125,6 +165,7 @@ export function JournalGrid({
   canEdit,
   subjectName,
   askMode,
+  mode,
 }: {
   lessons: GridLesson[];
   rows: GridRow[];
@@ -133,6 +174,8 @@ export function JournalGrid({
   subjectName: string;
   /** Режим «Кого спросить?» (?ask=1): подсветка кандидатов на опрос. */
   askMode: boolean;
+  /** Режим экрана по составу строк (считает страница из assessments). */
+  mode: GridMode;
 }) {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -143,6 +186,14 @@ export function JournalGrid({
   const [overrides, setOverrides] = useState<Record<string, GridGrade[]>>({});
   /** Оптимистичные отметки «Н»: ключ клетки -> отсутствует ли. */
   const [absenceOverrides, setAbsenceOverrides] = useState<Record<string, boolean>>({});
+  /** Оптимистичные уровни освоения: ключ клетки -> уровень или null (снят). */
+  const [masteryOverrides, setMasteryOverrides] = useState<Record<string, GridMastery | null>>(
+    {},
+  );
+  /** Оптимистичные печати клетки. */
+  const [stampOverrides, setStampOverrides] = useState<Record<string, (StampKind | null)[]>>(
+    {},
+  );
   const [selected, setSelected] = useState<{ row: number; col: number } | null>(null);
   const [picker, setPicker] = useState<{ row: number; col: number; x: number; y: number } | null>(
     null,
@@ -162,6 +213,8 @@ export function JournalGrid({
   useEffect(() => {
     setOverrides({});
     setAbsenceOverrides({});
+    setMasteryOverrides({});
+    setStampOverrides({});
   }, [rows, lessons]);
 
   useEffect(() => () => void (pendingOne.current && clearTimeout(pendingOne.current)), []);
@@ -204,6 +257,30 @@ export function JournalGrid({
       return row.absentLessons.includes(lesson.id);
     },
     [absenceOverrides, lessons, rows],
+  );
+
+  const masteryAt = useCallback(
+    (rowIndex: number, colIndex: number): GridMastery | null => {
+      const row = rows[rowIndex];
+      const lesson = lessons[colIndex];
+      if (!row || !lesson) return null;
+      const key = cellKey(row.studentId, lesson.id);
+      if (key in masteryOverrides) return masteryOverrides[key] ?? null;
+      return row.mastery[lesson.id] ?? null;
+    },
+    [lessons, masteryOverrides, rows],
+  );
+
+  const stampsAt = useCallback(
+    (rowIndex: number, colIndex: number): (StampKind | null)[] => {
+      const row = rows[rowIndex];
+      const lesson = lessons[colIndex];
+      if (!row || !lesson) return [];
+      const key = cellKey(row.studentId, lesson.id);
+      if (key in stampOverrides) return stampOverrides[key] ?? [];
+      return row.stamps[lesson.id] ?? [];
+    },
+    [lessons, rows, stampOverrides],
   );
 
   /** Непрощённый долг клетки (id) — без оптимистики: пометка идёт через refresh. */
@@ -285,9 +362,46 @@ export function JournalGrid({
     [gradesAt, lessons.length, quarter, rows],
   );
 
+  /**
+   * Средний класса — ТОЛЬКО по оценочным строкам: историческая оценка
+   * безотметочного ученика (перевод классов) не должна попадать в итоги.
+   */
   const classAverage = useMemo(
-    () => averageGrade(rowStats.map((s) => s.average).filter((v): v is number => v !== null)),
-    [rowStats],
+    () =>
+      averageGrade(
+        rowStats
+          .map((stat, index) => (rows[index]?.assessment === "graded" ? stat.average : null))
+          .filter((value): value is number => value !== null),
+      ),
+    [rowStats, rows],
+  );
+
+  /** Живые счётчики уровней строки за четверть — колонка «Уровни». */
+  const levelCountsFor = useCallback(
+    (rowIndex: number): Record<MasteryLevel, number> => {
+      const counts: Record<MasteryLevel, number> = { high: 0, medium: 0, low: 0 };
+      for (let colIndex = 0; colIndex < lessons.length; colIndex += 1) {
+        const mastery = masteryAt(rowIndex, colIndex);
+        if (mastery) counts[mastery.level] += 1;
+      }
+      return counts;
+    },
+    [lessons.length, masteryAt],
+  );
+
+  /** Печатей строки за ГОД: серверный итог + оптимистичная дельта четверти. */
+  const yearStampsFor = useCallback(
+    (rowIndex: number): number => {
+      const row = rows[rowIndex];
+      if (!row) return 0;
+      const serverQuarter = Object.values(row.stamps).reduce((sum, list) => sum + list.length, 0);
+      let liveQuarter = 0;
+      for (let colIndex = 0; colIndex < lessons.length; colIndex += 1) {
+        liveQuarter += stampsAt(rowIndex, colIndex).length;
+      }
+      return Math.max(0, row.stampsYearTotal - serverQuarter + liveQuarter);
+    },
+    [lessons.length, rows, stampsAt],
   );
 
   /**
@@ -318,8 +432,16 @@ export function JournalGrid({
   }, [gradesAt, isAbsent, lessons, rows]);
 
   const askCandidates = useMemo(
-    () => (askMode ? new Set(pickAskCandidates(askStats)) : new Set<string>()),
-    [askMode, askStats],
+    () =>
+      askMode
+        ? new Set(
+            // Безотметочные строки — не кандидаты: «спросить на оценку» им нечего.
+            pickAskCandidates(
+              askStats.filter((_, index) => rows[index]?.assessment === "graded"),
+            ),
+          )
+        : new Set<string>(),
+    [askMode, askStats, rows],
   );
 
   /** Скрыть режим «Кого спросить?»: убрать ?ask=1 из адреса. */
@@ -491,13 +613,20 @@ export function JournalGrid({
 
       const key = cellKey(row.studentId, lesson.id);
       const prevGrades = gradesAt(rowIndex, colIndex);
+      const prevMastery = masteryAt(rowIndex, colIndex);
+      const prevStamps = stampsAt(rowIndex, colIndex);
+      // «Н» вытесняет из клетки всё: оценки, уровень и печати (правило клетки).
       setOverrides((prev) => ({ ...prev, [key]: [] }));
+      setMasteryOverrides((prev) => ({ ...prev, [key]: null }));
+      setStampOverrides((prev) => ({ ...prev, [key]: [] }));
       setAbsenceOverrides((prev) => ({ ...prev, [key]: true }));
 
       startTransition(async () => {
         const result = await setAbsenceAction({ studentId: row.studentId, lessonId: lesson.id });
         if (!result.ok) {
           setOverrides((prev) => ({ ...prev, [key]: prevGrades }));
+          setMasteryOverrides((prev) => ({ ...prev, [key]: prevMastery }));
+          setStampOverrides((prev) => ({ ...prev, [key]: prevStamps }));
           setAbsenceOverrides((prev) => ({ ...prev, [key]: false }));
           show("error", `${result.status}: ${result.error}`);
           return;
@@ -505,7 +634,7 @@ export function JournalGrid({
         router.refresh();
       });
     },
-    [gradesAt, lessons, router, rows, show],
+    [gradesAt, lessons, masteryAt, router, rows, show, stampsAt],
   );
 
   const clearAbsent = useCallback(
@@ -527,6 +656,163 @@ export function JournalGrid({
       });
     },
     [lessons, router, rows, show],
+  );
+
+  /**
+   * Отметить уровень освоения (безотметочная строка). Комментарий передаётся
+   * явно: setMasteryAction перезаписывает его целиком, и быстрый ввод с
+   * клавиатуры обязан передать текущий, иначе сотрёт его.
+   */
+  const commitMastery = useCallback(
+    (rowIndex: number, colIndex: number, level: MasteryLevel, comment?: string) => {
+      const row = rows[rowIndex];
+      const lesson = lessons[colIndex];
+      if (!row || !lesson) return;
+
+      const key = cellKey(row.studentId, lesson.id);
+      const prevGrades = gradesAt(rowIndex, colIndex);
+      const prevMastery = masteryAt(rowIndex, colIndex);
+      const prevAbsent = isAbsent(rowIndex, colIndex);
+      const trimmed = comment?.trim() || null;
+
+      // Клетка содержит одно из: оценки | уровень | «Н» — оптимистично тоже.
+      setOverrides((prev) => ({ ...prev, [key]: [] }));
+      setAbsenceOverrides((prev) => ({ ...prev, [key]: false }));
+      setMasteryOverrides((prev) => ({ ...prev, [key]: { level, comment: trimmed } }));
+      setSettled((prev) => ({ ...prev, [key]: (prev[key] ?? 0) + 1 }));
+
+      startTransition(async () => {
+        const result = await setMasteryAction({
+          studentId: row.studentId,
+          lessonId: lesson.id,
+          level,
+          comment: trimmed ?? undefined,
+        });
+        if (!result.ok) {
+          setOverrides((prev) => ({ ...prev, [key]: prevGrades }));
+          setMasteryOverrides((prev) => ({ ...prev, [key]: prevMastery }));
+          setAbsenceOverrides((prev) => ({ ...prev, [key]: prevAbsent }));
+          show("error", `${result.status}: ${result.error}`);
+          return;
+        }
+        router.refresh();
+      });
+    },
+    [gradesAt, isAbsent, lessons, masteryAt, router, rows, show],
+  );
+
+  const clearLevel = useCallback(
+    (rowIndex: number, colIndex: number) => {
+      const row = rows[rowIndex];
+      const lesson = lessons[colIndex];
+      if (!row || !lesson) return;
+
+      const key = cellKey(row.studentId, lesson.id);
+      const prevMastery = masteryAt(rowIndex, colIndex);
+      if (!prevMastery) return;
+      setMasteryOverrides((prev) => ({ ...prev, [key]: null }));
+
+      startTransition(async () => {
+        const result = await clearMasteryAction({ studentId: row.studentId, lessonId: lesson.id });
+        if (!result.ok) {
+          setMasteryOverrides((prev) => ({ ...prev, [key]: prevMastery }));
+          show("error", `${result.status}: ${result.error}`);
+          return;
+        }
+        router.refresh();
+      });
+    },
+    [lessons, masteryAt, router, rows, show],
+  );
+
+  /** Поставить или снять печать (идемпотентные set/remove вместо гоняющегося toggle). */
+  const toggleStamp = useCallback(
+    (rowIndex: number, colIndex: number, kind: StampKind, active: boolean) => {
+      const row = rows[rowIndex];
+      const lesson = lessons[colIndex];
+      if (!row || !lesson) return;
+
+      const key = cellKey(row.studentId, lesson.id);
+      const prevStamps = stampsAt(rowIndex, colIndex);
+      const nextStamps = active
+        ? prevStamps.filter((stamp) => stamp !== kind)
+        : [...prevStamps, kind];
+      setStampOverrides((prev) => ({ ...prev, [key]: nextStamps }));
+
+      startTransition(async () => {
+        const result = active
+          ? await removeStampAction({ studentId: row.studentId, lessonId: lesson.id, kind })
+          : await setStampAction({ studentId: row.studentId, lessonId: lesson.id, kind });
+        if (!result.ok) {
+          setStampOverrides((prev) => ({ ...prev, [key]: prevStamps }));
+          show("error", `${result.status}: ${result.error}`);
+          return;
+        }
+        router.refresh();
+      });
+    },
+    [lessons, router, rows, show, stampsAt],
+  );
+
+  /** Shift+Delete безотметочной клетки: снять уровень, печати и исторические оценки. */
+  const clearGradelessCell = useCallback(
+    (rowIndex: number, colIndex: number) => {
+      const row = rows[rowIndex];
+      const lesson = lessons[colIndex];
+      if (!row || !lesson) return;
+
+      const key = cellKey(row.studentId, lesson.id);
+      const prevMastery = masteryAt(rowIndex, colIndex);
+      const prevStamps = stampsAt(rowIndex, colIndex);
+      const prevGrades = gradesAt(rowIndex, colIndex);
+      if (!prevMastery && prevStamps.length === 0 && prevGrades.length === 0) return;
+
+      setMasteryOverrides((prev) => ({ ...prev, [key]: null }));
+      setStampOverrides((prev) => ({ ...prev, [key]: [] }));
+      setOverrides((prev) => ({ ...prev, [key]: [] }));
+
+      startTransition(async () => {
+        const rollback = () => {
+          setMasteryOverrides((prev) => ({ ...prev, [key]: prevMastery }));
+          setStampOverrides((prev) => ({ ...prev, [key]: prevStamps }));
+          setOverrides((prev) => ({ ...prev, [key]: prevGrades }));
+        };
+        if (prevMastery) {
+          const result = await clearMasteryAction({
+            studentId: row.studentId,
+            lessonId: lesson.id,
+          });
+          if (!result.ok) {
+            rollback();
+            show("error", `${result.status}: ${result.error}`);
+            return;
+          }
+        }
+        for (const kind of prevStamps) {
+          if (kind === null) continue; // неизвестный вид снять кнопкой нельзя
+          const result = await removeStampAction({
+            studentId: row.studentId,
+            lessonId: lesson.id,
+            kind,
+          });
+          if (!result.ok) {
+            rollback();
+            show("error", `${result.status}: ${result.error}`);
+            return;
+          }
+        }
+        if (prevGrades.length > 0) {
+          const result = await clearCellAction({ studentId: row.studentId, lessonId: lesson.id });
+          if (!result.ok) {
+            rollback();
+            show("error", `${result.status}: ${result.error}`);
+            return;
+          }
+        }
+        router.refresh();
+      });
+    },
+    [gradesAt, lessons, masteryAt, router, rows, show, stampsAt],
   );
 
   const advanceDown = useCallback(
@@ -562,12 +848,38 @@ export function JournalGrid({
 
     if (!canEdit) return;
 
-    // «Н» с клавиатуры — русская «н» или латинская «h».
+    // «Н» с клавиатуры — русская «н» или латинская «h». Универсальна для
+    // обеих систем оценивания: посещаемость есть и в 1–2 классах.
     if (key === "н" || key === "Н" || key === "h" || key === "H") {
       event.preventDefault();
       if (isAbsent(row, col)) clearAbsent(row, col);
       else markAbsent(row, col);
       advanceDown(row, col);
+      return;
+    }
+
+    // Безотметочная строка: 1=усвоил, 2=усваивает, 3=нужна помощь. Коммит
+    // немедленный — двузначных значений нет, хак «отложенной единицы» не нужен.
+    if (rows[row]?.assessment === "gradeless") {
+      if (key === "Delete" || key === "Backspace") {
+        event.preventDefault();
+        if (isAbsent(row, col)) return clearAbsent(row, col);
+        if (shiftKey) return clearGradelessCell(row, col);
+        if (masteryAt(row, col)) return clearLevel(row, col);
+        // Историческая оценка (перевод классов): Delete снимает и её.
+        const grades = gradesAt(row, col);
+        if (grades.length > 0) removeGrade(row, col, grades.length - 1);
+        return;
+      }
+      if (/^[1-3]$/.test(key) && !shiftKey) {
+        event.preventDefault();
+        const level = MASTERY_LEVEL_KEYS[Number(key) - 1]!;
+        commitMastery(row, col, level, masteryAt(row, col)?.comment ?? undefined);
+        advanceDown(row, col);
+        return;
+      }
+      // 4–9 и 0 игнорируются: баллов у безотметочной строки не существует.
+      if (/^[0-9]$/.test(key)) event.preventDefault();
       return;
     }
 
@@ -656,20 +968,55 @@ export function JournalGrid({
     : -1;
   const panelLesson = panelColIndex >= 0 ? lessons[panelColIndex] : undefined;
 
-  /** Анализ столбца для панели — по live-данным (видит оптимистичные оценки). */
-  const panelAnalysis = useMemo(
-    () =>
-      lessonPanel?.type === "insight" && panelColIndex >= 0
-        ? analyzeLessonColumn(
-            rows.map((row, rowIndex) => ({
-              name: row.name,
-              grades: gradesAt(rowIndex, panelColIndex),
-              absent: isAbsent(rowIndex, panelColIndex),
-            })),
-          )
-        : null,
-    [lessonPanel, panelColIndex, rows, gradesAt, isAbsent],
-  );
+  /**
+   * Анализ столбца для панели — по live-данным (видит оптимистичные оценки).
+   * Оценочные и безотметочные строки анализируются РАЗДЕЛЬНО: первоклассник
+   * без оценок — не «без оценки», у него другая шкала.
+   */
+  const panelAnalysis = useMemo(() => {
+    if (lessonPanel?.type !== "insight" || panelColIndex < 0) return null;
+    const graded = rows
+      .map((row, rowIndex) => ({ row, rowIndex }))
+      .filter(({ row }) => row.assessment === "graded");
+    if (graded.length === 0) return null;
+    return analyzeLessonColumn(
+      graded.map(({ row, rowIndex }) => ({
+        name: row.name,
+        grades: gradesAt(rowIndex, panelColIndex),
+        absent: isAbsent(rowIndex, panelColIndex),
+      })),
+    );
+  }, [lessonPanel, panelColIndex, rows, gradesAt, isAbsent]);
+
+  /** Безотметочный анализ того же столбца (уровни/печати вместо гистограммы). */
+  const panelGradelessAnalysis = useMemo(() => {
+    if (lessonPanel?.type !== "insight" || panelColIndex < 0) return null;
+    const gradeless = rows
+      .map((row, rowIndex) => ({ row, rowIndex }))
+      .filter(({ row }) => row.assessment === "gradeless");
+    if (gradeless.length === 0) return null;
+    return analyzeGradelessColumn(
+      gradeless.map(({ row, rowIndex }) => ({
+        name: row.name,
+        level: masteryAt(rowIndex, panelColIndex)?.level ?? null,
+        absent: isAbsent(rowIndex, panelColIndex),
+        stamps: stampsAt(rowIndex, panelColIndex).length,
+      })),
+    );
+  }, [lessonPanel, panelColIndex, rows, masteryAt, isAbsent, stampsAt]);
+
+  /** Пустое состояние безотметочного класса: уроки есть, а отметок ещё нет. */
+  const gradelessHint = useMemo(() => {
+    if (mode !== "gradeless" || lessons.length === 0 || rows.length === 0) return false;
+    for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
+      for (let colIndex = 0; colIndex < lessons.length; colIndex += 1) {
+        if (masteryAt(rowIndex, colIndex) || stampsAt(rowIndex, colIndex).length > 0) {
+          return false;
+        }
+      }
+    }
+    return true;
+  }, [lessons.length, masteryAt, mode, rows, stampsAt]);
 
   const activeCell = selected ?? { row: 0, col: 0 };
 
@@ -711,6 +1058,14 @@ export function JournalGrid({
           >
             Скрыть
           </button>
+        </div>
+      )}
+
+      {/* ── Пустое состояние безотметочного класса: что делать дальше ─────── */}
+      {gradelessHint && canEdit && (
+        <div className="animate-fade-in rounded-lg border border-primary/30 bg-primary/[0.04] px-3 py-2 text-xs text-muted-foreground">
+          Это безотметочный класс: вместо оценок отмечайте уровень освоения (клик по клетке или
+          клавиши 1·2·3) и выдавайте печати-поощрения.
         </div>
       )}
 
@@ -780,29 +1135,44 @@ export function JournalGrid({
                 </th>
               ))}
               <th scope="col" aria-hidden className="w-auto border-b-2 border-rule-strong" />
+              {/* В чисто безотметочном режиме итоговые графы — про уровни и
+                  печати; в mixed остаются «Средний»/«Год», строки ветвятся сами */}
               <th
                 scope="col"
                 className="w-24 border-b-2 border-l border-rule-strong bg-secondary/40 px-3 py-2 text-center align-bottom text-xs font-semibold uppercase tracking-wide text-muted-foreground"
-                title="Средний балл за четверть"
+                title={
+                  mode === "gradeless"
+                    ? "Уровни освоения за четверть: усвоил · усваивает · нужна помощь"
+                    : "Средний балл за четверть"
+                }
               >
-                Средний
+                {mode === "gradeless" ? "Уровни" : "Средний"}
               </th>
               <th
                 scope="col"
                 className="w-16 border-b-2 border-rule-strong bg-secondary/40 px-2 py-2 text-center align-bottom text-xs font-semibold uppercase tracking-wide text-muted-foreground"
-                title="Годовая оценка: среднее по четвертям, округлённое до целого"
+                title={
+                  mode === "gradeless"
+                    ? "Печатей-поощрений за учебный год"
+                    : "Годовая оценка: среднее по четвертям, округлённое до целого"
+                }
               >
-                Год
+                {mode === "gradeless" ? "Печати" : "Год"}
               </th>
             </tr>
           </thead>
 
           <tbody>
             {rows.map((row, rowIndex) => {
+              const gradelessRow = row.assessment === "gradeless";
               const ask = askStats[rowIndex];
-              const isAskCandidate = askCandidates.has(row.studentId);
-              const lowCount = (ask?.gradeCount ?? 0) < LOW_GRADE_COUNT;
-              const staleAsk = (ask?.lessonsSinceAsked ?? 0) >= NOT_ASKED_WINDOW;
+              const isAskCandidate = !gradelessRow && askCandidates.has(row.studentId);
+              const lowCount = !gradelessRow && (ask?.gradeCount ?? 0) < LOW_GRADE_COUNT;
+              const staleAsk = !gradelessRow && (ask?.lessonsSinceAsked ?? 0) >= NOT_ASKED_WINDOW;
+              const rowLevelCounts = gradelessRow ? levelCountsFor(rowIndex) : null;
+              const rowMasteryCount = rowLevelCounts
+                ? rowLevelCounts.high + rowLevelCounts.medium + rowLevelCounts.low
+                : 0;
 
               return (
               <tr
@@ -832,13 +1202,19 @@ export function JournalGrid({
                     {/* Накопляемость: постоянный счётчик, на hover уступает
                         место стрелке перехода в карточку ученика */}
                     <span className="relative flex h-3.5 shrink-0 items-center">
+                      {/* Накопляемость: у оценочной строки — оценки за четверть,
+                          у безотметочной — отмеченные уровни (без «мало оценок») */}
                       <span
                         className="flex items-center gap-0.5 transition-opacity group-hover/row:opacity-0"
-                        title={`Оценок за четверть: ${ask?.gradeCount ?? 0}${
-                          staleAsk
-                            ? ` · без оценки ${ask!.lessonsSinceAsked} прошедших уроков подряд`
-                            : ""
-                        }`}
+                        title={
+                          gradelessRow
+                            ? `Уровней за четверть: ${rowMasteryCount}`
+                            : `Оценок за четверть: ${ask?.gradeCount ?? 0}${
+                                staleAsk
+                                  ? ` · без оценки ${ask!.lessonsSinceAsked} прошедших уроков подряд`
+                                  : ""
+                              }`
+                        }
                       >
                         {staleAsk && (
                           <History className="h-3 w-3 text-muted-foreground" aria-hidden />
@@ -851,7 +1227,7 @@ export function JournalGrid({
                               : "text-muted-foreground",
                           )}
                         >
-                          {ask?.gradeCount ?? 0}
+                          {gradelessRow ? rowMasteryCount : (ask?.gradeCount ?? 0)}
                         </span>
                       </span>
                       <ExternalLink
@@ -865,7 +1241,9 @@ export function JournalGrid({
                 {lessons.map((lesson, colIndex) => {
                   const grades = gradesAt(rowIndex, colIndex);
                   const absent = isAbsent(rowIndex, colIndex);
-                  const debtOpen = hasOpenDebt(rowIndex, colIndex);
+                  const mastery = gradelessRow ? masteryAt(rowIndex, colIndex) : null;
+                  const cellStamps = gradelessRow ? stampsAt(rowIndex, colIndex) : [];
+                  const debtOpen = !gradelessRow && hasOpenDebt(rowIndex, colIndex);
                   const isSelected = selected?.row === rowIndex && selected?.col === colIndex;
                   const key = cellKey(row.studentId, lesson.id);
                   const monthBreak =
@@ -893,13 +1271,19 @@ export function JournalGrid({
                         aria-label={`${row.name}, ${formatDateShort(lesson.date)}, ${
                           absent
                             ? "отсутствовал"
-                            : grades.length > 0
-                              ? `оценки ${grades.map((g) => g.value).join(" и ")}`
-                              : "оценка не выставлена"
-                        }${debtOpen ? ", открыт долг" : ""}`}
+                            : mastery
+                              ? `уровень: ${MASTERY_LEVELS[mastery.level].label}`
+                              : grades.length > 0
+                                ? `оценки ${grades.map((g) => g.value).join(" и ")}`
+                                : gradelessRow
+                                  ? "уровень не отмечен"
+                                  : "оценка не выставлена"
+                        }${cellStamps.length > 0 ? `, печатей: ${cellStamps.length}` : ""}${
+                          debtOpen ? ", открыт долг" : ""
+                        }`}
                         className={cn(
                           "relative flex h-9 w-full items-center justify-center transition-colors focus:outline-none",
-                          grades.length === 0 && !absent && "hover:bg-primary/10",
+                          grades.length === 0 && !absent && !mastery && "hover:bg-primary/10",
                           isSelected && "ring-2 ring-inset ring-primary",
                           canEdit ? "cursor-pointer" : "cursor-default",
                         )}
@@ -913,7 +1297,14 @@ export function JournalGrid({
                             className="absolute left-1 top-1 h-1 w-1 rounded-full border border-amber-600 dark:border-amber-400"
                           />
                         )}
-                        <CellContent grades={grades} absent={absent} settleKey={settled[key] ?? 0} />
+                        <CellContent
+                          grades={grades}
+                          absent={absent}
+                          mastery={mastery}
+                          stamps={cellStamps}
+                          gradelessRow={gradelessRow}
+                          settleKey={settled[key] ?? 0}
+                        />
                       </button>
                     </td>
                   );
@@ -921,68 +1312,152 @@ export function JournalGrid({
 
                 <td className="border-b border-rule" />
 
-                <td className="border-b border-l border-rule-strong bg-secondary/30 px-3 py-0 text-center">
-                  <span
-                    className={cn(
-                      "block text-[15px] font-semibold leading-tight tabular-nums",
-                      averageColorClasses(rowStats[rowIndex]?.average ?? null),
-                    )}
-                  >
-                    {formatAverage(rowStats[rowIndex]?.average ?? null)}
-                  </span>
-                  {/* Прогноз «а что, если»: цвета шкалы не применяются —
-                      это гипотетические числа, а не данные */}
-                  {rowStats[rowIndex]?.average != null && (
-                    <span className="block whitespace-nowrap text-[10px] leading-none tabular-nums text-muted-foreground">
-                      10→{formatAverage(rowStats[rowIndex]?.p10 ?? null)} · 1→
-                      {formatAverage(rowStats[rowIndex]?.p1 ?? null)}
-                    </span>
-                  )}
-                </td>
-                <td className="border-b border-rule bg-secondary/30 px-2 py-1 text-center">
-                  <span
-                    className={cn(
-                      "inline-flex h-7 w-9 items-center justify-center rounded text-[15px] font-bold tabular-nums",
-                      gradeColorClasses(rowStats[rowIndex]?.year ?? null),
-                    )}
-                  >
-                    {rowStats[rowIndex]?.year ?? "—"}
-                  </span>
-                </td>
+                {gradelessRow ? (
+                  <>
+                    {/* Итог безотметочной строки: счётчики уровней вместо среднего
+                        (прогнозы 10→/1→ не существуют — уровень не число) */}
+                    <td className="border-b border-l border-rule-strong bg-secondary/30 px-2 py-0 text-center">
+                      {rowMasteryCount > 0 && rowLevelCounts ? (
+                        <span
+                          className="inline-flex items-center justify-center gap-1"
+                          title="Уровни за четверть: усвоил · усваивает · нужна помощь"
+                        >
+                          {MASTERY_LEVEL_KEYS.filter((level) => rowLevelCounts[level] > 0).map(
+                            (level) => (
+                              <span
+                                key={level}
+                                className={cn(
+                                  "inline-flex h-5 items-center rounded px-1 text-[11px] font-semibold tabular-nums",
+                                  masteryColorClasses(level),
+                                )}
+                              >
+                                {MASTERY_LEVELS[level].glyph}
+                                {rowLevelCounts[level]}
+                              </span>
+                            ),
+                          )}
+                        </span>
+                      ) : (
+                        <span className="text-sm text-muted-foreground">—</span>
+                      )}
+                    </td>
+                    <td className="border-b border-rule bg-secondary/30 px-2 py-1 text-center">
+                      <span
+                        className="inline-flex items-center justify-center gap-1 text-[13px] font-semibold tabular-nums"
+                        title="Печатей-поощрений за год"
+                      >
+                        <StampSealMini kind={null} seed={row.studentId} />
+                        {yearStampsFor(rowIndex)}
+                      </span>
+                    </td>
+                  </>
+                ) : (
+                  <>
+                    <td className="border-b border-l border-rule-strong bg-secondary/30 px-3 py-0 text-center">
+                      <span
+                        className={cn(
+                          "block text-[15px] font-semibold leading-tight tabular-nums",
+                          averageColorClasses(rowStats[rowIndex]?.average ?? null),
+                        )}
+                      >
+                        {formatAverage(rowStats[rowIndex]?.average ?? null)}
+                      </span>
+                      {/* Прогноз «а что, если»: цвета шкалы не применяются —
+                          это гипотетические числа, а не данные */}
+                      {rowStats[rowIndex]?.average != null && (
+                        <span className="block whitespace-nowrap text-[10px] leading-none tabular-nums text-muted-foreground">
+                          10→{formatAverage(rowStats[rowIndex]?.p10 ?? null)} · 1→
+                          {formatAverage(rowStats[rowIndex]?.p1 ?? null)}
+                        </span>
+                      )}
+                    </td>
+                    <td className="border-b border-rule bg-secondary/30 px-2 py-1 text-center">
+                      <span
+                        className={cn(
+                          "inline-flex h-7 w-9 items-center justify-center rounded text-[15px] font-bold tabular-nums",
+                          gradeColorClasses(rowStats[rowIndex]?.year ?? null),
+                        )}
+                      >
+                        {rowStats[rowIndex]?.year ?? "—"}
+                      </span>
+                    </td>
+                  </>
+                )}
               </tr>
               );
             })}
           </tbody>
 
           <tfoot>
-            <tr className="bg-secondary/50 text-xs">
-              <th
-                scope="row"
-                className="sticky left-0 z-10 border-r border-t-2 border-rule-strong bg-secondary px-3 py-2 text-left font-medium text-muted-foreground"
-              >
-                Средний балл класса
-              </th>
-              {lessons.map((lesson, colIndex) => {
-                const items = rows.flatMap((_, rowIndex) => gradesAt(rowIndex, colIndex));
-                return (
-                  <td
-                    key={lesson.id}
-                    className="border-t-2 border-rule-strong px-0 py-2 text-center tabular-nums"
-                  >
-                    <span className={averageColorClasses(weightedAverage(items))}>
-                      {formatAverage(weightedAverage(items))}
+            {mode === "gradeless" ? (
+              /* Безотметочный подвал: «среднего класса» не существует —
+                 считаем охват: у скольких учеников столбца есть уровень или «Н» */
+              <tr className="bg-secondary/50 text-xs">
+                <th
+                  scope="row"
+                  className="sticky left-0 z-10 border-r border-t-2 border-rule-strong bg-secondary px-3 py-2 text-left font-medium text-muted-foreground"
+                >
+                  Отмечено
+                </th>
+                {lessons.map((lesson, colIndex) => {
+                  const marked = rows.reduce(
+                    (sum, _, rowIndex) =>
+                      sum +
+                      (masteryAt(rowIndex, colIndex) || isAbsent(rowIndex, colIndex) ? 1 : 0),
+                    0,
+                  );
+                  return (
+                    <td
+                      key={lesson.id}
+                      className="border-t-2 border-rule-strong px-0 py-2 text-center tabular-nums text-muted-foreground"
+                    >
+                      {marked}/{rows.length}
+                    </td>
+                  );
+                })}
+                <td className="border-t-2 border-rule-strong" />
+                <td className="border-l border-t-2 border-rule-strong" />
+                <td className="border-t-2 border-rule-strong px-2 py-2" />
+              </tr>
+            ) : (
+              /* Средний класса — только по оценочным строкам (в mixed
+                 исторические оценки безотметочных не подмешиваются) */
+              <tr className="bg-secondary/50 text-xs">
+                <th
+                  scope="row"
+                  className="sticky left-0 z-10 border-r border-t-2 border-rule-strong bg-secondary px-3 py-2 text-left font-medium text-muted-foreground"
+                >
+                  Средний балл класса
+                  {mode === "mixed" && (
+                    <span className="block text-[10px] font-normal leading-tight">
+                      по оценочным ученикам
                     </span>
-                  </td>
-                );
-              })}
-              <td className="border-t-2 border-rule-strong" />
-              <td className="border-l border-t-2 border-rule-strong px-3 py-2 text-center font-semibold tabular-nums">
-                <span className={averageColorClasses(classAverage)}>
-                  {formatAverage(classAverage)}
-                </span>
-              </td>
-              <td className="border-t-2 border-rule-strong px-2 py-2" />
-            </tr>
+                  )}
+                </th>
+                {lessons.map((lesson, colIndex) => {
+                  const items = rows.flatMap((row, rowIndex) =>
+                    row.assessment === "graded" ? gradesAt(rowIndex, colIndex) : [],
+                  );
+                  return (
+                    <td
+                      key={lesson.id}
+                      className="border-t-2 border-rule-strong px-0 py-2 text-center tabular-nums"
+                    >
+                      <span className={averageColorClasses(weightedAverage(items))}>
+                        {formatAverage(weightedAverage(items))}
+                      </span>
+                    </td>
+                  );
+                })}
+                <td className="border-t-2 border-rule-strong" />
+                <td className="border-l border-t-2 border-rule-strong px-3 py-2 text-center font-semibold tabular-nums">
+                  <span className={averageColorClasses(classAverage)}>
+                    {formatAverage(classAverage)}
+                  </span>
+                </td>
+                <td className="border-t-2 border-rule-strong px-2 py-2" />
+              </tr>
+            )}
           </tfoot>
         </table>
       </div>
@@ -994,12 +1469,18 @@ export function JournalGrid({
         canEdit={canEdit}
         gradesAt={gradesAt}
         isAbsent={isAbsent}
+        masteryAt={masteryAt}
+        stampsAt={stampsAt}
+        levelCountsFor={levelCountsFor}
         hasDebtAt={(r, c) => debtIdAt(r, c) !== null}
         hasOpenDebtAt={hasOpenDebt}
         rowStats={rowStats}
         onPick={(r, c, value, slot, kind, comment) => commitGrade(r, c, value, slot, kind, comment)}
         onUpdateMeta={(r, c, kind, comment) => updateCellMeta(r, c, kind, comment)}
         onRemove={(r, c, slot) => removeGrade(r, c, slot)}
+        onPickLevel={(r, c, level, comment) => commitMastery(r, c, level, comment)}
+        onClearLevel={(r, c) => clearLevel(r, c)}
+        onToggleStamp={(r, c, kind, active) => toggleStamp(r, c, kind, active)}
         onAbsent={(r, c) => markAbsent(r, c)}
         onClearAbsent={(r, c) => clearAbsent(r, c)}
         onMarkDebt={(r, c) => markDebt(r, c)}
@@ -1024,21 +1505,63 @@ export function JournalGrid({
           onClose={closeLessonPanel}
         />
       )}
-      {lessonPanel?.type === "insight" && panelLesson && panelAnalysis && (
-        <LessonInsight
-          /* key — чтобы черновик домашки не переезжал на другой урок */
-          key={`insight-${panelLesson.id}`}
-          lesson={panelLesson}
-          subjectName={subjectName}
-          canEdit={canEdit}
-          origin={lessonPanel.origin}
-          analysis={panelAnalysis}
-          onFlash={show}
-          onClose={closeLessonPanel}
+      {lessonPanel?.type === "insight" &&
+        panelLesson &&
+        (panelAnalysis || panelGradelessAnalysis) && (
+          <LessonInsight
+            /* key — чтобы черновик домашки не переезжал на другой урок */
+            key={`insight-${panelLesson.id}`}
+            lesson={panelLesson}
+            subjectName={subjectName}
+            canEdit={canEdit}
+            origin={lessonPanel.origin}
+            analysis={panelAnalysis}
+            gradelessAnalysis={panelGradelessAnalysis}
+            onFlash={show}
+            onClose={closeLessonPanel}
+          />
+        )}
+
+      {/* Клетка безотметочной строки открывает LevelPicker вместо GradePicker */}
+      {picker && canEdit && rows[picker.row]?.assessment === "gradeless" && (
+        <LevelPicker
+          /* key — чтобы при переходе на другую клетку окно пересоздалось
+             с уровнем и комментарием ЭТОЙ клетки, а не предыдущей */
+          key={`level-${picker.row}-${picker.col}`}
+          x={picker.x}
+          y={picker.y}
+          studentName={rows[picker.row]?.name ?? ""}
+          mastery={masteryAt(picker.row, picker.col)}
+          stamps={stampsAt(picker.row, picker.col)}
+          absent={isAbsent(picker.row, picker.col)}
+          /* Выбор уровня окно НЕ закрывает: следом печати и комментарий */
+          onPickLevel={(level, comment) =>
+            commitMastery(picker.row, picker.col, level, comment)
+          }
+          onCommitComment={(comment) => {
+            const mastery = masteryAt(picker.row, picker.col);
+            if (mastery) commitMastery(picker.row, picker.col, mastery.level, comment);
+          }}
+          onToggleStamp={(kind, active) => toggleStamp(picker.row, picker.col, kind, active)}
+          onClearLevel={() => clearLevel(picker.row, picker.col)}
+          onAbsent={() => {
+            markAbsent(picker.row, picker.col);
+            setPicker(null);
+            focusCell(picker.row, picker.col);
+          }}
+          onClearAbsent={() => {
+            clearAbsent(picker.row, picker.col);
+            setPicker(null);
+            focusCell(picker.row, picker.col);
+          }}
+          onClose={() => {
+            setPicker(null);
+            focusCell(picker.row, picker.col);
+          }}
         />
       )}
 
-      {picker && canEdit && (
+      {picker && canEdit && rows[picker.row]?.assessment !== "gradeless" && (
         <GradePicker
           /* key — чтобы при переходе на другую клетку окно пересоздалось
              с типом и комментарием ЭТОЙ клетки, а не предыдущей */
@@ -1087,14 +1610,27 @@ export function JournalGrid({
   );
 }
 
-/** Содержимое клетки: «Н», пусто, «8» или «10/9». Контрольная — с точкой снизу. */
+/**
+ * Содержимое клетки: «Н», пусто, «8» или «10/9». Контрольная — с точкой снизу.
+ *
+ * Безотметочная строка: чип уровня с глифом ●/◐/○ (НИКОГДА не буква «Н» —
+ * она зарезервирована за отсутствием), точка комментария в правом верхнем
+ * углу цветом --primary (конвенция DESIGN.md), справа — до двух мини-оттисков
+ * печатей; историческая оценка (перевод классов) — обычный чип с пояснением.
+ */
 function CellContent({
   grades,
   absent,
+  mastery,
+  stamps,
+  gradelessRow,
   settleKey,
 }: {
   grades: GridGrade[];
   absent: boolean;
+  mastery: GridMastery | null;
+  stamps: (StampKind | null)[];
+  gradelessRow: boolean;
   settleKey: number;
 }) {
   if (absent) {
@@ -1107,6 +1643,57 @@ function CellContent({
       </span>
     );
   }
+
+  if (gradelessRow) {
+    if (!mastery && stamps.length === 0 && grades.length === 0) {
+      return <span className="text-transparent">·</span>;
+    }
+    return (
+      <span key={settleKey} className="animate-ink-settle flex items-center gap-0.5">
+        {mastery && (
+          <span
+            className={cn(
+              "relative flex h-7 w-9 items-center justify-center rounded text-[13px] font-bold",
+              masteryColorClasses(mastery.level),
+            )}
+            title={`${MASTERY_LEVELS[mastery.level].label} (${MASTERY_LEVELS[mastery.level].teacherLabel})${
+              mastery.comment ? ` — ${mastery.comment}` : ""
+            }`}
+          >
+            {MASTERY_LEVELS[mastery.level].glyph}
+            {/* Точка комментария — правый верхний угол, цвет --primary */}
+            {mastery.comment && (
+              <span
+                aria-hidden
+                className="absolute -right-0.5 -top-0.5 h-1.5 w-1.5 rounded-full bg-primary ring-2 ring-card"
+              />
+            )}
+          </span>
+        )}
+        {/* Историческая оценка до перехода на безотметочное обучение */}
+        {grades.map((grade, index) => (
+          <span
+            key={`grade-${index}`}
+            className={cn(
+              "flex h-7 w-[1.6rem] items-center justify-center rounded text-[13px] font-semibold tabular-nums",
+              gradeColorClasses(grade.value),
+            )}
+            title="Оценка выставлена до перехода на безотметочное обучение"
+          >
+            {grade.value}
+          </span>
+        ))}
+        {stamps.length > 0 && (
+          <span className="flex flex-col gap-0.5">
+            {stamps.slice(0, MAX_STAMPS_PER_LESSON).map((kind, index) => (
+              <StampSealMini key={`stamp-${index}`} kind={kind} seed={`${kind ?? "x"}${index}`} />
+            ))}
+          </span>
+        )}
+      </span>
+    );
+  }
+
   if (grades.length === 0) {
     return <span className="text-transparent">·</span>;
   }
@@ -1159,12 +1746,18 @@ function MobileLessonBoard({
   canEdit,
   gradesAt,
   isAbsent,
+  masteryAt,
+  stampsAt,
+  levelCountsFor,
   hasDebtAt,
   hasOpenDebtAt,
   rowStats,
   onPick,
   onUpdateMeta,
   onRemove,
+  onPickLevel,
+  onClearLevel,
+  onToggleStamp,
   onAbsent,
   onClearAbsent,
   onMarkDebt,
@@ -1177,6 +1770,10 @@ function MobileLessonBoard({
   canEdit: boolean;
   gradesAt: (row: number, col: number) => GridGrade[];
   isAbsent: (row: number, col: number) => boolean;
+  masteryAt: (row: number, col: number) => GridMastery | null;
+  stampsAt: (row: number, col: number) => (StampKind | null)[];
+  /** Живые счётчики уровней строки за четверть — подпись безотметочной строки. */
+  levelCountsFor: (row: number) => Record<MasteryLevel, number>;
   /** Есть непрощённый долг (в т.ч. закрытый оценкой) — для кнопки «Снять долг». */
   hasDebtAt: (row: number, col: number) => boolean;
   /** Долг открыт (оценки нет) — для маркера на кнопке клетки. */
@@ -1185,6 +1782,9 @@ function MobileLessonBoard({
   onPick: (row: number, col: number, value: number, slot: number, kind: GradeKind, comment?: string) => void;
   onUpdateMeta: (row: number, col: number, kind: GradeKind, comment: string) => void;
   onRemove: (row: number, col: number, slot: number) => void;
+  onPickLevel: (row: number, col: number, level: MasteryLevel, comment?: string) => void;
+  onClearLevel: (row: number, col: number) => void;
+  onToggleStamp: (row: number, col: number, kind: StampKind, active: boolean) => void;
   onAbsent: (row: number, col: number) => void;
   onClearAbsent: (row: number, col: number) => void;
   onMarkDebt: (row: number, col: number) => void;
@@ -1198,11 +1798,15 @@ function MobileLessonBoard({
   const [kind, setKind] = useState<GradeKind>("regular");
   const [comment, setComment] = useState("");
 
-  /** Открыть карточку ученика: подхватываем тип и комментарий его оценки. */
+  /** Открыть карточку ученика: подхватываем тип и комментарий его отметки. */
   const openStudent = (rowIndex: number) => {
-    const grades = gradesAt(rowIndex, colIndex);
-    setKind(grades[0]?.kind ?? "regular");
-    setComment(grades[0]?.comment ?? "");
+    if (rows[rowIndex]?.assessment === "gradeless") {
+      setComment(masteryAt(rowIndex, colIndex)?.comment ?? "");
+    } else {
+      const grades = gradesAt(rowIndex, colIndex);
+      setKind(grades[0]?.kind ?? "regular");
+      setComment(grades[0]?.comment ?? "");
+    }
     setOpenRow(rowIndex);
   };
 
@@ -1263,10 +1867,17 @@ function MobileLessonBoard({
 
       <ul className="divide-y divide-rule overflow-hidden rounded-lg border border-rule-strong bg-card">
         {rows.map((row, rowIndex) => {
+          const gradelessRow = row.assessment === "gradeless";
           const grades = gradesAt(rowIndex, colIndex);
           const absent = isAbsent(rowIndex, colIndex);
-          const hasDebt = hasDebtAt(rowIndex, colIndex);
-          const debtOpen = hasOpenDebtAt(rowIndex, colIndex);
+          const mastery = gradelessRow ? masteryAt(rowIndex, colIndex) : null;
+          const cellStamps = gradelessRow ? stampsAt(rowIndex, colIndex) : [];
+          const rowLevelCounts = gradelessRow ? levelCountsFor(rowIndex) : null;
+          const rowQuarterStamps = gradelessRow
+            ? lessons.reduce((sum, _, index) => sum + stampsAt(rowIndex, index).length, 0)
+            : 0;
+          const hasDebt = !gradelessRow && hasDebtAt(rowIndex, colIndex);
+          const debtOpen = !gradelessRow && hasOpenDebtAt(rowIndex, colIndex);
           const isOpen = openRow === rowIndex;
 
           return (
@@ -1285,11 +1896,25 @@ function MobileLessonBoard({
                     )}
                   </span>
                   <span className="block text-[11px] tabular-nums text-muted-foreground">
-                    средний за четверть: {formatAverage(rowStats[rowIndex]?.average ?? null)}
-                    {rowStats[rowIndex]?.average != null &&
-                      ` · 10→${formatAverage(rowStats[rowIndex]?.p10 ?? null)} · 1→${formatAverage(
-                        rowStats[rowIndex]?.p1 ?? null,
-                      )}`}
+                    {gradelessRow
+                      ? `уровней: ${
+                          rowLevelCounts &&
+                          rowLevelCounts.high + rowLevelCounts.medium + rowLevelCounts.low > 0
+                            ? MASTERY_LEVEL_KEYS.filter((level) => rowLevelCounts[level] > 0)
+                                .map(
+                                  (level) =>
+                                    `${MASTERY_LEVELS[level].glyph}${rowLevelCounts[level]}`,
+                                )
+                                .join(" ")
+                            : "—"
+                        } · печатей: ${rowQuarterStamps}`
+                      : `средний за четверть: ${formatAverage(rowStats[rowIndex]?.average ?? null)}${
+                          rowStats[rowIndex]?.average != null
+                            ? ` · 10→${formatAverage(rowStats[rowIndex]?.p10 ?? null)} · 1→${formatAverage(
+                                rowStats[rowIndex]?.p1 ?? null,
+                              )}`
+                            : ""
+                        }`}
                   </span>
                 </Link>
 
@@ -1302,7 +1927,7 @@ function MobileLessonBoard({
                     "relative flex h-11 min-w-[3.5rem] shrink-0 items-center justify-center gap-0.5 rounded-md px-1.5 text-base font-bold tabular-nums transition-transform active:scale-95",
                     absent
                       ? "bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-100"
-                      : grades.length === 0
+                      : (gradelessRow ? !mastery && cellStamps.length === 0 : grades.length === 0)
                         ? "border border-dashed border-input text-muted-foreground"
                         : "",
                     isOpen && "ring-2 ring-primary",
@@ -1315,27 +1940,163 @@ function MobileLessonBoard({
                       className="absolute left-1 top-1 h-1 w-1 rounded-full border border-amber-600 dark:border-amber-400"
                     />
                   )}
-                  {absent
-                    ? "Н"
-                    : grades.length === 0
-                      ? "—"
-                      : grades.map((grade, index) => (
-                          <span key={index} className="flex items-center">
-                            {index > 0 && <span className="px-0.5 text-xs opacity-60">/</span>}
-                            <span
-                              className={cn(
-                                "flex h-8 w-8 items-center justify-center rounded",
-                                gradeColorClasses(grade.value),
-                              )}
-                            >
-                              {grade.value}
-                            </span>
+                  {absent ? (
+                    "Н"
+                  ) : gradelessRow ? (
+                    !mastery && cellStamps.length === 0 ? (
+                      "—"
+                    ) : (
+                      <span className="flex items-center gap-0.5">
+                        {mastery && (
+                          <span
+                            className={cn(
+                              "flex h-8 w-8 items-center justify-center rounded text-[15px]",
+                              masteryColorClasses(mastery.level),
+                            )}
+                          >
+                            {MASTERY_LEVELS[mastery.level].glyph}
                           </span>
-                        ))}
+                        )}
+                        {cellStamps.length > 0 && (
+                          <span className="flex flex-col gap-0.5">
+                            {cellStamps.slice(0, MAX_STAMPS_PER_LESSON).map((stampKind, index) => (
+                              <StampSealMini
+                                key={index}
+                                kind={stampKind}
+                                seed={`${stampKind ?? "x"}${index}`}
+                              />
+                            ))}
+                          </span>
+                        )}
+                      </span>
+                    )
+                  ) : grades.length === 0 ? (
+                    "—"
+                  ) : (
+                    grades.map((grade, index) => (
+                      <span key={index} className="flex items-center">
+                        {index > 0 && <span className="px-0.5 text-xs opacity-60">/</span>}
+                        <span
+                          className={cn(
+                            "flex h-8 w-8 items-center justify-center rounded",
+                            gradeColorClasses(grade.value),
+                          )}
+                        >
+                          {grade.value}
+                        </span>
+                      </span>
+                    ))
+                  )}
                 </button>
               </div>
 
-              {isOpen && canEdit && (
+              {isOpen && canEdit && gradelessRow && (
+                <div className="animate-fade-in space-y-3 border-t border-rule bg-secondary/40 p-2.5">
+                  {/* Три уровня во всю ширину — крупные тап-цели */}
+                  <div className="space-y-1.5">
+                    {MASTERY_LEVEL_KEYS.map((level) => (
+                      <button
+                        key={level}
+                        type="button"
+                        onClick={() => onPickLevel(rowIndex, colIndex, level, comment)}
+                        className={cn(
+                          "focus-ring flex h-12 w-full items-center gap-2 rounded-md px-3 text-base font-semibold transition-transform active:scale-[0.99]",
+                          masteryColorClasses(level),
+                          mastery?.level === level && "ring-2 ring-primary",
+                        )}
+                      >
+                        <span aria-hidden>{MASTERY_LEVELS[level].glyph}</span>
+                        {MASTERY_LEVELS[level].label}
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* Печати-тоглы (лимит и «Н» проверяет и сервер) */}
+                  <div className="flex flex-wrap gap-1.5">
+                    {STAMP_KIND_KEYS.map((stampKind) => {
+                      const active = cellStamps.includes(stampKind);
+                      const limitReached =
+                        cellStamps.filter(
+                          (item): item is StampKind => item !== null && item !== stampKind,
+                        ).length >= MAX_STAMPS_PER_LESSON;
+                      return (
+                        <button
+                          key={stampKind}
+                          type="button"
+                          onClick={() => onToggleStamp(rowIndex, colIndex, stampKind, active)}
+                          disabled={absent || (!active && limitReached)}
+                          aria-pressed={active}
+                          className={cn(
+                            "focus-ring h-11 rounded-full border px-3 text-xs font-medium disabled:cursor-not-allowed disabled:opacity-50",
+                            active
+                              ? "border-primary/60 bg-primary/10 text-primary"
+                              : "border-input bg-card text-muted-foreground",
+                          )}
+                        >
+                          {STAMP_KINDS[stampKind].label}
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  <input
+                    type="text"
+                    value={comment}
+                    onChange={(event) => setComment(event.target.value)}
+                    onBlur={() => {
+                      if (mastery) onPickLevel(rowIndex, colIndex, mastery.level, comment);
+                    }}
+                    placeholder="Комментарий к уровню"
+                    maxLength={300}
+                    className="focus-ring h-11 w-full rounded-md border border-input bg-card px-3 text-sm text-foreground placeholder:text-muted-foreground"
+                  />
+
+                  {mastery && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onClearLevel(rowIndex, colIndex);
+                        setOpenRow(null);
+                      }}
+                      className="focus-ring flex h-10 w-full items-center justify-center gap-1.5 rounded-md text-sm text-muted-foreground"
+                    >
+                      <Eraser className="h-4 w-4" aria-hidden />
+                      Убрать уровень
+                    </button>
+                  )}
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (absent) onClearAbsent(rowIndex, colIndex);
+                      else onAbsent(rowIndex, colIndex);
+                      setOpenRow(null);
+                    }}
+                    className={cn(
+                      "focus-ring flex h-10 w-full items-center justify-center gap-1.5 rounded-md text-sm font-medium",
+                      absent
+                        ? "bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-100"
+                        : "text-muted-foreground ring-1 ring-border",
+                    )}
+                  >
+                    <UserX className="h-4 w-4" aria-hidden />
+                    {absent ? "Снять «Н» (был на уроке)" : "Отметить «Н» (отсутствовал)"}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (mastery) onPickLevel(rowIndex, colIndex, mastery.level, comment);
+                      setOpenRow(null);
+                    }}
+                    className="focus-ring flex h-10 w-full items-center justify-center rounded-md bg-secondary text-sm font-semibold"
+                  >
+                    Готово
+                  </button>
+                </div>
+              )}
+
+              {isOpen && canEdit && !gradelessRow && (
                 <div className="animate-fade-in space-y-3 border-t border-rule bg-secondary/40 p-2.5">
                   {/* Тип работы: если оценка уже стоит — правится сразу */}
                   <div className="flex flex-wrap gap-1.5">

@@ -31,6 +31,7 @@ export function JournalToolbar({
   locked,
   lockedQuarters,
   askMode,
+  mode,
   topicSuggestions,
   lessons,
   students,
@@ -51,11 +52,17 @@ export function JournalToolbar({
   lockedQuarters: number[];
   /** Включён ли режим «Кого спросить?» (?ask=1). */
   askMode: boolean;
+  /**
+   * Режим экрана: graded | gradeless | mixed (считает страница по классам
+   * строк). Меняет подсказку клавиш и прячет «Кого спросить?» у чисто
+   * безотметочного класса — спрашивать «на оценку» там некого.
+   */
+  mode: "graded" | "gradeless" | "mixed";
   /** Темы прошлых уроков предмета — подсказки в поле темы нового урока. */
   topicSuggestions: string[];
   /** Уроки выбранной четверти — для массового выставления и предпросмотра сетки. */
   lessons: BulkLesson[];
-  /** Ученики журнала (с учётом фильтра по классу). */
+  /** ОЦЕНОЧНЫЕ ученики журнала (с учётом фильтра класса) — для массового выставления. */
   students: BulkStudent[];
 }) {
   const router = useRouter();
@@ -171,8 +178,9 @@ export function JournalToolbar({
             <Download className="h-4 w-4" aria-hidden />
           </a>
           {/* Инструменты записи в закрытой четверти прячутся: замок отобьёт их
-              и на сервере (423), но предлагать обречённое действие незачем */}
-          {!locked && (
+              и на сервере (423), но предлагать обречённое действие незачем.
+              В чисто безотметочном классе «Кого спросить?» не существует (v1). */}
+          {!locked && mode !== "gradeless" && (
             <Button
               variant="outline"
               onClick={() => startAskTransition(() => navigate({ ask: askMode ? null : "1" }))}
@@ -304,8 +312,18 @@ export function JournalToolbar({
         />
       )}
 
+      {/* Смешанный журнал: оценочные и безотметочные классы в одной таблице —
+          подсказываем сузить выбор, чтобы итоговые графы обрели один смысл */}
+      {mode === "mixed" && (
+        <p className="px-1 text-xs text-muted-foreground">
+          Выберите класс — в журнале смешаны оценочные и безотметочные классы: строки ведутся
+          каждая по своей системе, а итоги внизу считаются только по оценочным.
+        </p>
+      )}
+
       {/* Подсказка про клавиши бессмысленна там, где нет клавиатуры,
-          и в закрытой четверти, где ввод оценок выключен */}
+          и в закрытой четверти, где ввод оценок выключен. Набор клавиш
+          зависит от режима: у безотметочного класса цифры — это уровни */}
       <p className={cn(
         "hidden flex-wrap items-center gap-x-3 gap-y-1 px-1 text-xs text-muted-foreground",
         !locked && "md:flex",
@@ -317,17 +335,39 @@ export function JournalToolbar({
         <span>
           <Kbd>←</Kbd> <Kbd>→</Kbd> <Kbd>↑</Kbd> <Kbd>↓</Kbd> — перемещение
         </span>
+        {mode === "gradeless" ? (
+          <>
+            <span>
+              <Kbd>1</Kbd> — усвоил, <Kbd>2</Kbd> — усваивает, <Kbd>3</Kbd> — нужна помощь
+            </span>
+            <span>
+              <Kbd>Enter</Kbd> — уровень, печати и комментарий мышью
+            </span>
+            <span>
+              <Kbd>Del</Kbd> — снять уровень
+            </span>
+          </>
+        ) : (
+          <>
+            <span>
+              <Kbd>1</Kbd>…<Kbd>9</Kbd>, <Kbd>0</Kbd> = 10 — выставить оценку
+            </span>
+            <span>
+              <Kbd>Enter</Kbd> — выбрать мышью
+            </span>
+            <span>
+              <Kbd>Shift</Kbd>+цифра — вторая оценка за урок (10/9)
+            </span>
+            <span>
+              <Kbd>Del</Kbd> — убрать оценку
+            </span>
+            {mode === "mixed" && (
+              <span>в безотметочных строках: 1·2·3 — уровни</span>
+            )}
+          </>
+        )}
         <span>
-          <Kbd>1</Kbd>…<Kbd>9</Kbd>, <Kbd>0</Kbd> = 10 — выставить оценку
-        </span>
-        <span>
-          <Kbd>Enter</Kbd> — выбрать мышью
-        </span>
-        <span>
-          <Kbd>Shift</Kbd>+цифра — вторая оценка за урок (10/9)
-        </span>
-        <span>
-          <Kbd>Del</Kbd> — убрать оценку
+          <Kbd>н</Kbd> — отметка «Н»
         </span>
       </p>
 

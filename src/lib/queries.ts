@@ -1,6 +1,14 @@
 import type { AuditAction } from "@/lib/audit-actions";
 import { ForbiddenError, type SessionUser } from "@/lib/auth-guards";
 import {
+  asMasteryLevel,
+  asStampKind,
+  assessmentOf,
+  type Assessment,
+  type MasteryLevel,
+  type StampKind,
+} from "@/lib/gradeless";
+import {
   asGradeKind,
   averageGrade,
   classSummary,
@@ -66,8 +74,19 @@ export type CellGrade = {
 
 export type JournalRow = {
   student: { id: string; name: string; className: string | null };
+  /**
+   * Система оценивания строки — подсказка интерфейсу (assessmentOf по классу).
+   * Данные ниже отдаются независимо от неё: история переживает перевод 2→3.
+   */
+  assessment: Assessment;
   /** lessonId -> оценки клетки, отсортированные по позиции */
   cells: Record<string, CellGrade[]>;
+  /** lessonId -> уровень освоения клетки (безотметочные 1–2 классы). */
+  mastery: Record<string, { level: MasteryLevel; comment: string | null }>;
+  /** lessonId -> печати клетки; null — неизвестный вид (рисуется как «Печать»). */
+  stamps: Record<string, (StampKind | null)[]>;
+  /** Печатей за ГОД — колонка «Печати» безотметочной строки. */
+  stampsYearTotal: number;
   /** lessonId, на которых у ученика отмечено «Н» */
   absentLessons: string[];
   /**
@@ -146,49 +165,70 @@ export async function getJournalData(
   year: number,
   className?: string | null,
 ): Promise<JournalData> {
-  const [lessons, students, gradesOfQuarter, gradesOfYear, absencesOfQuarter, debtsOfQuarter] =
-    await Promise.all([
-      prisma.lesson.findMany({
-        where: { subjectId, quarter, year, ...LIVE_LESSON },
-        orderBy: { date: "asc" },
-        select: {
-          id: true,
-          date: true,
-          quarter: true,
-          topic: true,
-          homework: true,
-          plannedKind: true,
-        },
-      }),
-      getStudents(className),
-      prisma.grade.findMany({
-        where: { subjectId, quarter, year, lesson: LIVE_LESSON },
-        orderBy: { slot: "asc" },
-        select: {
-          id: true,
-          value: true,
-          slot: true,
-          kind: true,
-          weight: true,
-          comment: true,
-          studentId: true,
-          lessonId: true,
-        },
-      }),
-      prisma.grade.findMany({
-        where: { subjectId, year, lesson: LIVE_LESSON },
-        select: { value: true, weight: true, studentId: true, quarter: true },
-      }),
-      prisma.absence.findMany({
-        where: { subjectId, quarter, year, lesson: LIVE_LESSON },
-        select: { studentId: true, lessonId: true },
-      }),
-      // Непрощённые долги четверти — маркер в клетке и кнопка «Снять долг».
-      prisma.debt.findMany({
-        where: { subjectId, quarter, year, clearedAt: null, lesson: LIVE_LESSON },
-        select: { id: true, studentId: true, lessonId: true },
-      }),
-    ]);
+  const [
+    lessons,
+    students,
+    gradesOfQuarter,
+    gradesOfYear,
+    absencesOfQuarter,
+    debtsOfQuarter,
+    masteryOfQuarter,
+    stampsOfYear,
+  ] = await Promise.all([
+    prisma.lesson.findMany({
+      where: { subjectId, quarter, year, ...LIVE_LESSON },
+      orderBy: { date: "asc" },
+      select: {
+        id: true,
+        date: true,
+        quarter: true,
+        topic: true,
+        homework: true,
+        plannedKind: true,
+      },
+    }),
+    getStudents(className),
+    prisma.grade.findMany({
+      where: { subjectId, quarter, year, lesson: LIVE_LESSON },
+      orderBy: { slot: "asc" },
+      select: {
+        id: true,
+        value: true,
+        slot: true,
+        kind: true,
+        weight: true,
+        comment: true,
+        studentId: true,
+        lessonId: true,
+      },
+    }),
+    prisma.grade.findMany({
+      where: { subjectId, year, lesson: LIVE_LESSON },
+      select: { value: true, weight: true, studentId: true, quarter: true },
+    }),
+    prisma.absence.findMany({
+      where: { subjectId, quarter, year, lesson: LIVE_LESSON },
+      select: { studentId: true, lessonId: true },
+    }),
+    // Непрощённые долги четверти — маркер в клетке и кнопка «Снять долг».
+    prisma.debt.findMany({
+      where: { subjectId, quarter, year, clearedAt: null, lesson: LIVE_LESSON },
+      select: { id: true, studentId: true, lessonId: true },
+    }),
+    // Безотметочные данные читаются БЕЗУСЛОВНО: у оценочных классов запросы
+    // возвращают пустоту по индексу (≈0 стоимости), а отображение при
+    // переводе 2→3 получается data-driven, без флагов и второго прохода.
+    prisma.masteryMark.findMany({
+      where: { subjectId, quarter, year, lesson: LIVE_LESSON },
+      select: { level: true, comment: true, studentId: true, lessonId: true },
+    }),
+    // Печати за ГОД: клетки четверти + счётчик колонки «Печати».
+    prisma.lessonStamp.findMany({
+      where: { subjectId, year, lesson: LIVE_LESSON },
+      orderBy: { createdAt: "asc" },
+      select: { kind: true, quarter: true, studentId: true, lessonId: true },
+    }),
+  ]);
 
   const cellsByStudent = new Map<string, Record<string, CellGrade[]>>();
   for (const grade of gradesOfQuarter) {
@@ -220,6 +260,33 @@ export async function getJournalData(
     debtsByStudent.set(debt.studentId, list);
   }
 
+  // Уровни клеток: защитное чтение — неизвестный уровень отбрасывается.
+  const masteryByStudent = new Map<
+    string,
+    Record<string, { level: MasteryLevel; comment: string | null }>
+  >();
+  for (const mark of masteryOfQuarter) {
+    const level = asMasteryLevel(mark.level);
+    if (level === null) continue;
+    const cells = masteryByStudent.get(mark.studentId) ?? {};
+    cells[mark.lessonId] = { level, comment: mark.comment };
+    masteryByStudent.set(mark.studentId, cells);
+  }
+
+  // Печати: клетки выбранной четверти + годовой счётчик. Неизвестный вид
+  // не падает — рисуется нейтральной «Печатью» (null).
+  const stampsByStudent = new Map<string, Record<string, (StampKind | null)[]>>();
+  const stampsYearByStudent = new Map<string, number>();
+  for (const stamp of stampsOfYear) {
+    stampsYearByStudent.set(stamp.studentId, (stampsYearByStudent.get(stamp.studentId) ?? 0) + 1);
+    if (stamp.quarter !== quarter) continue;
+    const cells = stampsByStudent.get(stamp.studentId) ?? {};
+    const cell = cells[stamp.lessonId] ?? [];
+    cell.push(asStampKind(stamp.kind));
+    cells[stamp.lessonId] = cell;
+    stampsByStudent.set(stamp.studentId, cells);
+  }
+
   // Взвешенные оценки года, разложенные по четвертям.
   const yearValues = new Map<string, { value: number; weight: number }[][]>();
   for (const grade of gradesOfYear) {
@@ -237,7 +304,11 @@ export async function getJournalData(
 
     return {
       student: { id: student.id, name: student.name, className: student.className },
+      assessment: assessmentOf(student.className),
       cells,
+      mastery: masteryByStudent.get(student.id) ?? {},
+      stamps: stampsByStudent.get(student.id) ?? {},
+      stampsYearTotal: stampsYearByStudent.get(student.id) ?? 0,
       absentLessons,
       openDebts: debtsByStudent.get(student.id) ?? [],
       average: quarterAverages[quarter - 1] ?? null,
@@ -276,10 +347,26 @@ export type StudentSubjectReport = {
   /** Пропусков по предмету за год */
   absences: number;
   year: number | null;
+  /** Сколько уровней каждого вида по четвертям 1..4 (безотметочные 1–2 классы). */
+  masteryByQuarter: Record<MasteryLevel, number>[];
+  /** Словесные характеристики по четвертям 1..4; null — не написана. */
+  notes: (string | null)[];
+};
+
+/** Лист печатей ученика за год (безотметочный дневник). */
+export type StampSheet = {
+  total: number;
+  byKind: Partial<Record<StampKind, number>>;
+  /** Печатей по четвертям 1..4. */
+  byQuarter: number[];
+  /** Свежие первыми; kind null — неизвестный вид (рисуется как «Печать»). */
+  items: { id: string; kind: StampKind | null; date: Date; subjectName: string }[];
 };
 
 export type StudentReport = {
   student: { id: string; name: string; username: string; className: string | null };
+  /** Подсказка интерфейсу: какой дневник рисовать (assessmentOf по классу). */
+  assessment: Assessment;
   subjects: StudentSubjectReport[];
   /** Средний балл по всем предметам за каждую четверть */
   overallByQuarter: (number | null)[];
@@ -287,6 +374,8 @@ export type StudentReport = {
   overallYear: number | null;
   totalGrades: number;
   totalAbsences: number;
+  /** Печати за год (безотметочные 1–2 классы; у оценочных пустой). */
+  stampSheet: StampSheet;
 };
 
 /**
@@ -308,24 +397,47 @@ export async function getStudentReport(
   });
   if (!student) return null;
 
-  const [subjects, grades, absences, finals] = await Promise.all([
-    prisma.subject.findMany({ orderBy: { name: "asc" }, select: { id: true, name: true } }),
-    prisma.grade.findMany({
-      where: { studentId, year, lesson: LIVE_LESSON },
-      select: { value: true, weight: true, quarter: true, subjectId: true },
-    }),
-    prisma.absence.groupBy({
-      by: ["subjectId"],
-      where: { studentId, year, lesson: LIVE_LESSON },
-      _count: { _all: true },
-    }),
-    // Официальные отметки закрытых четвертей — из снимков-ведомостей.
-    // Переоткрытие удаляет снимок каскадом, и отметка сама исчезает из дневника.
-    prisma.quarterResult.findMany({
-      where: { studentId, year },
-      select: { subjectId: true, quarter: true, finalGrade: true },
-    }),
-  ]);
+  const [subjects, grades, absences, finals, masteryRows, noteRows, stampRows] =
+    await Promise.all([
+      prisma.subject.findMany({ orderBy: { name: "asc" }, select: { id: true, name: true } }),
+      prisma.grade.findMany({
+        where: { studentId, year, lesson: LIVE_LESSON },
+        select: { value: true, weight: true, quarter: true, subjectId: true },
+      }),
+      prisma.absence.groupBy({
+        by: ["subjectId"],
+        where: { studentId, year, lesson: LIVE_LESSON },
+        _count: { _all: true },
+      }),
+      // Официальные отметки закрытых четвертей — из снимков-ведомостей.
+      // Переоткрытие удаляет снимок каскадом, и отметка сама исчезает из дневника.
+      prisma.quarterResult.findMany({
+        where: { studentId, year },
+        select: { subjectId: true, quarter: true, finalGrade: true },
+      }),
+      // Безотметочные данные — безусловно: у оценочного ученика пусто по
+      // индексу, у переведённого 2→3 история остаётся видимой.
+      prisma.masteryMark.findMany({
+        where: { studentId, year, lesson: LIVE_LESSON },
+        select: { level: true, quarter: true, subjectId: true },
+      }),
+      prisma.quarterNote.findMany({
+        where: { studentId, year },
+        select: { text: true, quarter: true, subjectId: true },
+      }),
+      // Лист печатей: свежие первыми; take страхует от вырожденного объёма.
+      prisma.lessonStamp.findMany({
+        where: { studentId, year, lesson: LIVE_LESSON },
+        orderBy: { lesson: { date: "desc" } },
+        take: 400,
+        select: {
+          id: true,
+          kind: true,
+          quarter: true,
+          lesson: { select: { date: true, subject: { select: { name: true } } } },
+        },
+      }),
+    ]);
 
   const bySubject = new Map<string, { value: number; weight: number }[][]>();
   for (const grade of grades) {
@@ -350,6 +462,49 @@ export async function getStudentReport(
     closedBySubject.set(row.subjectId, subjectClosed);
   }
 
+  // Уровни освоения по (предмет × четверть) — защитное чтение уровня.
+  const masteryBySubject = new Map<string, Record<MasteryLevel, number>[]>();
+  for (const mark of masteryRows) {
+    const level = asMasteryLevel(mark.level);
+    const index = mark.quarter - 1;
+    if (level === null || index < 0 || index > 3) continue;
+    const perQuarter =
+      masteryBySubject.get(mark.subjectId) ??
+      QUARTERS.map(() => ({ high: 0, medium: 0, low: 0 }) as Record<MasteryLevel, number>);
+    perQuarter[index]![level] += 1;
+    masteryBySubject.set(mark.subjectId, perQuarter);
+  }
+
+  const notesBySubject = new Map<string, (string | null)[]>();
+  for (const note of noteRows) {
+    const index = note.quarter - 1;
+    if (index < 0 || index > 3) continue;
+    const perQuarter = notesBySubject.get(note.subjectId) ?? [null, null, null, null];
+    perQuarter[index] = note.text;
+    notesBySubject.set(note.subjectId, perQuarter);
+  }
+
+  const stampSheet: StampSheet = {
+    total: stampRows.length,
+    byKind: {},
+    byQuarter: [0, 0, 0, 0],
+    items: stampRows.map((stamp) => ({
+      id: stamp.id,
+      kind: asStampKind(stamp.kind),
+      date: stamp.lesson.date,
+      subjectName: stamp.lesson.subject.name,
+    })),
+  };
+  for (const stamp of stampSheet.items) {
+    if (stamp.kind !== null) {
+      stampSheet.byKind[stamp.kind] = (stampSheet.byKind[stamp.kind] ?? 0) + 1;
+    }
+  }
+  for (const stamp of stampRows) {
+    const index = stamp.quarter - 1;
+    if (index >= 0 && index < 4) stampSheet.byQuarter[index]! += 1;
+  }
+
   const subjectReports: StudentSubjectReport[] = subjects.map((subject) => {
     const perQuarter = bySubject.get(subject.id) ?? [[], [], [], []];
     const quarterAverages = perQuarter.map((items) => weightedAverage(items));
@@ -365,6 +520,10 @@ export async function getStudentReport(
       // Годовая — ТОЛЬКО от живых средних четвертей (правило 1.2):
       // finalGrade — документ, в годовую он не входит.
       year: yearGrade(quarterAverages),
+      masteryByQuarter:
+        masteryBySubject.get(subject.id) ??
+        QUARTERS.map(() => ({ high: 0, medium: 0, low: 0 }) as Record<MasteryLevel, number>),
+      notes: notesBySubject.get(subject.id) ?? [null, null, null, null],
     };
   });
 
@@ -377,6 +536,7 @@ export async function getStudentReport(
 
   return {
     student,
+    assessment: assessmentOf(student.className),
     subjects: subjectReports,
     overallByQuarter,
     overallYear: averageGrade(
@@ -384,6 +544,7 @@ export async function getStudentReport(
     ),
     totalGrades: grades.length,
     totalAbsences: absences.reduce((sum, a) => sum + a._count._all, 0),
+    stampSheet,
   };
 }
 
@@ -397,17 +558,29 @@ export type SubjectLessonRow = {
   /** Пометка планируемой работы; защитное чтение через isGradeKind. */
   plannedKind: GradeKind | null;
   grades: { value: number; kind: GradeKind; comment: string | null }[];
+  /** Уровень освоения клетки (безотметочные 1–2 классы); null — не отмечен. */
+  mastery: { level: MasteryLevel; comment: string | null } | null;
+  /** Печати клетки; null в массиве — неизвестный вид (рисуется как «Печать»). */
+  stamps: (StampKind | null)[];
   absent: boolean;
 };
 
 export type StudentSubjectDetail = {
   student: { id: string; name: string; className: string | null };
   subject: { id: string; name: string };
+  /** Подсказка интерфейсу: какой разбор рисовать (assessmentOf по классу). */
+  assessment: Assessment;
   /** Прошедшие уроки по четвертям: 4 массива, в каждом — уроки предмета */
   byQuarter: SubjectLessonRow[][];
   /** Будущие уроки (date > сегодня UTC) без оценок и без «Н», по возрастанию даты. */
   upcoming: SubjectLessonRow[];
   quarterAverages: (number | null)[];
+  /** Сколько уровней каждого вида по четвертям 1..4 (безотметочные). */
+  masteryByQuarter: Record<MasteryLevel, number>[];
+  /** Словесные характеристики по четвертям 1..4; null — не написана. */
+  notesByQuarter: (string | null)[];
+  /** Печатей по предмету за год. */
+  totalStamps: number;
   year: number | null;
   totalGrades: number;
   totalAbsences: number;
@@ -441,7 +614,7 @@ export async function getStudentSubjectDetail(
   ]);
   if (!student || !subject) return null;
 
-  const [lessons, grades, absences] = await Promise.all([
+  const [lessons, grades, absences, masteryRows, stampRows, noteRows] = await Promise.all([
     prisma.lesson.findMany({
       where: { subjectId, year, ...LIVE_LESSON },
       orderBy: { date: "asc" },
@@ -463,6 +636,20 @@ export async function getStudentSubjectDetail(
       where: { studentId, subjectId, year, lesson: LIVE_LESSON },
       select: { lessonId: true },
     }),
+    // Безотметочные данные — безусловно (у оценочного ученика пустота по индексу).
+    prisma.masteryMark.findMany({
+      where: { studentId, subjectId, year, lesson: LIVE_LESSON },
+      select: { level: true, comment: true, lessonId: true, quarter: true },
+    }),
+    prisma.lessonStamp.findMany({
+      where: { studentId, subjectId, year, lesson: LIVE_LESSON },
+      orderBy: { createdAt: "asc" },
+      select: { kind: true, lessonId: true },
+    }),
+    prisma.quarterNote.findMany({
+      where: { studentId, subjectId, year },
+      select: { text: true, quarter: true },
+    }),
   ]);
 
   const gradesByLesson = new Map<string, typeof grades>();
@@ -473,6 +660,29 @@ export async function getStudentSubjectDetail(
   }
   const absentLessons = new Set(absences.map((a) => a.lessonId));
 
+  const masteryByLesson = new Map<string, { level: MasteryLevel; comment: string | null }>();
+  const masteryByQuarter = QUARTERS.map(
+    () => ({ high: 0, medium: 0, low: 0 }) as Record<MasteryLevel, number>,
+  );
+  for (const mark of masteryRows) {
+    const level = asMasteryLevel(mark.level);
+    if (level === null) continue;
+    masteryByLesson.set(mark.lessonId, { level, comment: mark.comment });
+    const index = mark.quarter - 1;
+    if (index >= 0 && index < 4) masteryByQuarter[index]![level] += 1;
+  }
+  const stampsByLesson = new Map<string, (StampKind | null)[]>();
+  for (const stamp of stampRows) {
+    const list = stampsByLesson.get(stamp.lessonId) ?? [];
+    list.push(asStampKind(stamp.kind));
+    stampsByLesson.set(stamp.lessonId, list);
+  }
+  const notesByQuarter: (string | null)[] = [null, null, null, null];
+  for (const note of noteRows) {
+    const index = note.quarter - 1;
+    if (index >= 0 && index < 4) notesByQuarter[index] = note.text;
+  }
+
   const todayUtc = todayUtcMidnight();
   const byQuarter: SubjectLessonRow[][] = [[], [], [], []];
   const upcoming: SubjectLessonRow[] = [];
@@ -482,6 +692,8 @@ export async function getStudentSubjectDetail(
     if (index < 0 || index > 3) continue;
     const cell = gradesByLesson.get(lesson.id) ?? [];
     const absent = absentLessons.has(lesson.id);
+    const mastery = masteryByLesson.get(lesson.id) ?? null;
+    const stamps = stampsByLesson.get(lesson.id) ?? [];
     const row: SubjectLessonRow = {
       lessonId: lesson.id,
       date: lesson.date,
@@ -490,10 +702,12 @@ export async function getStudentSubjectDetail(
       homework: lesson.homework,
       plannedKind: isGradeKind(lesson.plannedKind) ? lesson.plannedKind : null,
       grades: cell.map((g) => ({ value: g.value, kind: asGradeKind(g.kind), comment: g.comment })),
+      mastery,
+      stamps,
       absent,
     };
     // Будущий урок без содержимого клетки — в «Впереди», а не в ленту четверти.
-    if (lesson.date <= todayUtc || cell.length > 0 || absent) {
+    if (lesson.date <= todayUtc || cell.length > 0 || absent || mastery || stamps.length > 0) {
       byQuarter[index]!.push(row);
       for (const g of cell) weightedByQuarter[index]!.push({ value: g.value, weight: g.weight });
     } else {
@@ -506,9 +720,13 @@ export async function getStudentSubjectDetail(
   return {
     student,
     subject,
+    assessment: assessmentOf(student.className),
     byQuarter,
     upcoming,
     quarterAverages,
+    masteryByQuarter,
+    notesByQuarter,
+    totalStamps: stampRows.length,
     year: yearGrade(quarterAverages),
     totalGrades: grades.length,
     totalAbsences: absences.length,
@@ -598,6 +816,95 @@ export async function getRecentGrades(studentId: string, year: number, take = 12
       teacher: { select: { name: true } },
     },
   });
+}
+
+/** Событие безотметочной ленты «что нового»: уровень или печать. */
+export type GradelessFeedItem = {
+  id: string;
+  type: "mastery" | "stamp";
+  /** Для type "mastery"; защитное чтение — неизвестный уровень отброшен раньше. */
+  level: MasteryLevel | null;
+  comment: string | null;
+  /** Для type "stamp"; null — неизвестный вид (рисуется как «Печать»). */
+  kind: StampKind | null;
+  quarter: number;
+  subject: { id: string; name: string };
+  lesson: { date: Date; topic: string | null };
+  teacherName: string | null;
+};
+
+/**
+ * Лента «что нового» безотметочного дневника: уровни и печати вперемешку,
+ * свежие первыми. Вызывается ВМЕСТО getRecentGrades для дневника 1–2 класса.
+ * Два запроса по take и слияние в JS: отдельный union в SQL не окупается.
+ */
+export async function getRecentGradelessMarks(
+  studentId: string,
+  year: number,
+  take = 12,
+): Promise<GradelessFeedItem[]> {
+  const [mastery, stamps] = await Promise.all([
+    prisma.masteryMark.findMany({
+      where: { studentId, year, lesson: LIVE_LESSON },
+      orderBy: { lesson: { date: "desc" } },
+      take,
+      select: {
+        id: true,
+        level: true,
+        comment: true,
+        quarter: true,
+        lesson: {
+          select: { date: true, topic: true, subject: { select: { id: true, name: true } } },
+        },
+        teacher: { select: { name: true } },
+      },
+    }),
+    prisma.lessonStamp.findMany({
+      where: { studentId, year, lesson: LIVE_LESSON },
+      orderBy: { lesson: { date: "desc" } },
+      take,
+      select: {
+        id: true,
+        kind: true,
+        quarter: true,
+        lesson: {
+          select: { date: true, topic: true, subject: { select: { id: true, name: true } } },
+        },
+        teacher: { select: { name: true } },
+      },
+    }),
+  ]);
+
+  const items: GradelessFeedItem[] = [
+    ...mastery
+      .filter((mark) => asMasteryLevel(mark.level) !== null)
+      .map((mark) => ({
+        id: mark.id,
+        type: "mastery" as const,
+        level: asMasteryLevel(mark.level),
+        comment: mark.comment,
+        kind: null,
+        quarter: mark.quarter,
+        subject: mark.lesson.subject,
+        lesson: { date: mark.lesson.date, topic: mark.lesson.topic },
+        teacherName: mark.teacher?.name ?? null,
+      })),
+    ...stamps.map((stamp) => ({
+      id: stamp.id,
+      type: "stamp" as const,
+      level: null,
+      comment: null,
+      kind: asStampKind(stamp.kind),
+      quarter: stamp.quarter,
+      subject: stamp.lesson.subject,
+      lesson: { date: stamp.lesson.date, topic: stamp.lesson.topic },
+      teacherName: stamp.teacher?.name ?? null,
+    })),
+  ];
+
+  return items
+    .sort((a, b) => b.lesson.date.getTime() - a.lesson.date.getTime())
+    .slice(0, take);
 }
 
 export async function getAdminStats() {
@@ -712,6 +1019,24 @@ export type QuarterReviewRow = {
   openDebts: number;
 };
 
+/** Строка безотметочного ученика в мастере «Итоги четверти». */
+export type GradelessReviewRow = {
+  student: { id: string; name: string; className: string | null };
+  /** Уровней освоения за четверть. */
+  masteryCount: number;
+  /** Сколько уровней каждого вида за четверть. */
+  levelCounts: Record<MasteryLevel, number>;
+  /** Печатей за четверть. */
+  stampCount: number;
+  absenceCount: number;
+  /** Оценок за четверть (историческая аномалия перевода классов; обычно 0). */
+  gradeCount: number;
+  /** Характеристика выбранной четверти; null — не написана. */
+  note: string | null;
+  /** Характеристики всех четвертей 1..4 — для «взять из прошлой четверти». */
+  notes: (string | null)[];
+};
+
 export type QuarterReview = {
   locked: QuarterLockInfo | null;
   /** Снимок при locked — экран-ведомость рисуется ИЗ НЕГО, а не из живых данных. */
@@ -724,6 +1049,10 @@ export type QuarterReview = {
         finalGrade: number | null;
         gradeCount: number;
         absenceCount: number;
+        /** true — строка безотметочного ученика: «б/о», не «н/а». */
+        gradeless: boolean;
+        /** Снимок характеристики на момент закрытия. */
+        note: string | null;
       }[]
     | null;
   lessonsTotal: number;
@@ -733,8 +1062,16 @@ export type QuarterReview = {
   trashedCount: number;
   /** Учеников после фильтра класса — для примечания «в ведомости N из M». */
   totalStudents: number;
-  /** Только ученики «со следом» по (subjectId, year): ≥1 оценка или ≥1 «Н» за ГОД. */
+  /**
+   * ОЦЕНОЧНЫЕ ученики «со следом» по (subjectId, year): ≥1 оценка или ≥1 «Н»
+   * за ГОД. Безотметочные (1–2 классы) — отдельно в gradelessRows, поэтому
+   * classAverage/summary их не видят и весь 1 класс не «неаттестован».
+   */
   rows: QuarterReviewRow[];
+  /** Безотметочные ученики «со следом» (оценка, «Н», уровень или печать за год). */
+  gradelessRows: GradelessReviewRow[];
+  /** Покрытие характеристик выбранной четверти по безотметочным ученикам. */
+  noteCoverage: { filled: number; total: number };
   classAverage: number | null;
   summary: ClassSummary;
 };
@@ -752,42 +1089,68 @@ export async function getQuarterReview(
   year: number,
   className?: string | null,
 ): Promise<QuarterReview> {
-  const [lock, lessons, students, grades, absences, debts, gradeTrace, absenceTrace, trashedCount] =
-    await Promise.all([
-      prisma.quarterLock.findUnique({
-        where: { subjectId_year_quarter: { subjectId, year, quarter } },
-        select: { id: true, closedAt: true, closedByName: true },
-      }),
-      prisma.lesson.findMany({
-        where: { subjectId, quarter, year, ...LIVE_LESSON },
-        orderBy: { date: "asc" },
-        select: { id: true, date: true, topic: true, plannedKind: true },
-      }),
-      getStudents(className),
-      prisma.grade.findMany({
-        where: { subjectId, quarter, year, lesson: LIVE_LESSON },
-        select: { studentId: true, lessonId: true, value: true, weight: true, kind: true },
-      }),
-      prisma.absence.findMany({
-        where: { subjectId, quarter, year, lesson: LIVE_LESSON },
-        select: { studentId: true, lessonId: true },
-      }),
-      prisma.debt.findMany({
-        where: { subjectId, quarter, year, clearedAt: null, lesson: LIVE_LESSON },
-        select: { studentId: true, lessonId: true },
-      }),
-      prisma.grade.groupBy({
-        by: ["studentId"],
-        where: { subjectId, year, lesson: LIVE_LESSON },
-      }),
-      prisma.absence.groupBy({
-        by: ["studentId"],
-        where: { subjectId, year, lesson: LIVE_LESSON },
-      }),
-      prisma.lesson.count({
-        where: { subjectId, quarter, year, NOT: { deletedAt: null } },
-      }),
-    ]);
+  const [
+    lock,
+    lessons,
+    students,
+    grades,
+    absences,
+    debts,
+    gradeTrace,
+    absenceTrace,
+    trashedCount,
+    masteryOfYear,
+    stampsOfYear,
+    notesOfYear,
+  ] = await Promise.all([
+    prisma.quarterLock.findUnique({
+      where: { subjectId_year_quarter: { subjectId, year, quarter } },
+      select: { id: true, closedAt: true, closedByName: true },
+    }),
+    prisma.lesson.findMany({
+      where: { subjectId, quarter, year, ...LIVE_LESSON },
+      orderBy: { date: "asc" },
+      select: { id: true, date: true, topic: true, plannedKind: true },
+    }),
+    getStudents(className),
+    prisma.grade.findMany({
+      where: { subjectId, quarter, year, lesson: LIVE_LESSON },
+      select: { studentId: true, lessonId: true, value: true, weight: true, kind: true },
+    }),
+    prisma.absence.findMany({
+      where: { subjectId, quarter, year, lesson: LIVE_LESSON },
+      select: { studentId: true, lessonId: true },
+    }),
+    prisma.debt.findMany({
+      where: { subjectId, quarter, year, clearedAt: null, lesson: LIVE_LESSON },
+      select: { studentId: true, lessonId: true },
+    }),
+    prisma.grade.groupBy({
+      by: ["studentId"],
+      where: { subjectId, year, lesson: LIVE_LESSON },
+    }),
+    prisma.absence.groupBy({
+      by: ["studentId"],
+      where: { subjectId, year, lesson: LIVE_LESSON },
+    }),
+    prisma.lesson.count({
+      where: { subjectId, quarter, year, NOT: { deletedAt: null } },
+    }),
+    // Безотметочные данные за ГОД одним запросом каждое: и след, и счётчики
+    // четверти (лишнего round-trip нет — важно при connection_limit=1).
+    prisma.masteryMark.findMany({
+      where: { subjectId, year, lesson: LIVE_LESSON },
+      select: { studentId: true, quarter: true, level: true },
+    }),
+    prisma.lessonStamp.findMany({
+      where: { subjectId, year, lesson: LIVE_LESSON },
+      select: { studentId: true, quarter: true },
+    }),
+    prisma.quarterNote.findMany({
+      where: { subjectId, year },
+      select: { studentId: true, quarter: true, text: true },
+    }),
+  ]);
 
   const results = lock
     ? await prisma.quarterResult.findMany({
@@ -801,6 +1164,8 @@ export async function getQuarterReview(
           finalGrade: true,
           gradeCount: true,
           absenceCount: true,
+          gradeless: true,
+          note: true,
         },
       })
     : null;
@@ -837,12 +1202,47 @@ export async function getQuarterReview(
     openDebtsByStudent.set(debt.studentId, (openDebtsByStudent.get(debt.studentId) ?? 0) + 1);
   }
 
+  // Счётчики безотметочной четверти + следы за год.
+  const levelCountsByStudent = new Map<string, Record<MasteryLevel, number>>();
+  const stampCountByStudent = new Map<string, number>();
+  const notesByStudent = new Map<string, (string | null)[]>();
   const traced = new Set<string>();
   for (const row of gradeTrace) traced.add(row.studentId);
   for (const row of absenceTrace) traced.add(row.studentId);
+  for (const mark of masteryOfYear) {
+    traced.add(mark.studentId);
+    if (mark.quarter !== quarter) continue;
+    const level = asMasteryLevel(mark.level);
+    if (level === null) continue;
+    const counts =
+      levelCountsByStudent.get(mark.studentId) ??
+      ({ high: 0, medium: 0, low: 0 } as Record<MasteryLevel, number>);
+    counts[level] += 1;
+    levelCountsByStudent.set(mark.studentId, counts);
+  }
+  for (const stamp of stampsOfYear) {
+    traced.add(stamp.studentId);
+    if (stamp.quarter !== quarter) continue;
+    stampCountByStudent.set(stamp.studentId, (stampCountByStudent.get(stamp.studentId) ?? 0) + 1);
+  }
+  for (const note of notesOfYear) {
+    const index = note.quarter - 1;
+    if (index < 0 || index > 3) continue;
+    const perQuarter = notesByStudent.get(note.studentId) ?? [null, null, null, null];
+    perQuarter[index] = note.text;
+    notesByStudent.set(note.studentId, perQuarter);
+  }
 
-  const rows: QuarterReviewRow[] = students
-    .filter((student) => traced.has(student.id))
+  // Разделение предикатом: ведомость оценочных и блок безотметочных не смешиваются.
+  const tracedStudents = students.filter((student) => traced.has(student.id));
+  const gradedStudents = tracedStudents.filter(
+    (student) => assessmentOf(student.className) === "graded",
+  );
+  const gradelessStudents = tracedStudents.filter(
+    (student) => assessmentOf(student.className) === "gradeless",
+  );
+
+  const rows: QuarterReviewRow[] = gradedStudents
     .map((student) => {
       const items = gradesByStudent.get(student.id) ?? [];
       const average = weightedAverage(items);
@@ -866,6 +1266,23 @@ export async function getQuarterReview(
       };
     });
 
+  const gradelessRows: GradelessReviewRow[] = gradelessStudents.map((student) => {
+    const levelCounts =
+      levelCountsByStudent.get(student.id) ??
+      ({ high: 0, medium: 0, low: 0 } as Record<MasteryLevel, number>);
+    const notes = notesByStudent.get(student.id) ?? [null, null, null, null];
+    return {
+      student: { id: student.id, name: student.name, className: student.className },
+      masteryCount: levelCounts.high + levelCounts.medium + levelCounts.low,
+      levelCounts,
+      stampCount: stampCountByStudent.get(student.id) ?? 0,
+      absenceCount: absencesByStudent.get(student.id) ?? 0,
+      gradeCount: (gradesByStudent.get(student.id) ?? []).length,
+      note: notes[quarter - 1] ?? null,
+      notes,
+    };
+  });
+
   return {
     locked: lock ? { closedAt: lock.closedAt, closedByName: lock.closedByName } : null,
     results,
@@ -877,6 +1294,11 @@ export async function getQuarterReview(
     trashedCount,
     totalStudents: students.length,
     rows,
+    gradelessRows,
+    noteCoverage: {
+      filled: gradelessRows.filter((row) => row.note !== null && row.note.trim() !== "").length,
+      total: gradelessRows.length,
+    },
     classAverage: averageGrade(
       rows.map((row) => row.average).filter((value): value is number => value !== null),
     ),
@@ -908,7 +1330,7 @@ export async function getQuarterCloseOverview(
   quarter: Quarter,
   year: number,
 ): Promise<QuarterCloseOverviewRow[]> {
-  const [subjects, locks, lessonCounts, topiclessCounts, grades, gradeTrace, absenceTrace] =
+  const [subjects, locks, lessonCounts, topiclessCounts, grades, gradeTrace, absenceTrace, classRows] =
     await Promise.all([
       prisma.subject.findMany({ orderBy: { name: "asc" }, select: { id: true, name: true } }),
       prisma.quarterLock.findMany({
@@ -937,8 +1359,19 @@ export async function getQuarterCloseOverview(
         by: ["subjectId", "studentId"],
         where: { year, lesson: LIVE_LESSON },
       }),
+      // Классы учеников: безотметочные (1–2 классы) не считаются «без оценок» —
+      // иначе целый первый класс блокировал бы пакетное закрытие как «н/а».
+      prisma.user.findMany({
+        where: { role: "STUDENT" },
+        select: { id: true, className: true },
+      }),
     ]);
 
+  const gradelessIds = new Set(
+    classRows
+      .filter((student) => assessmentOf(student.className) === "gradeless")
+      .map((student) => student.id),
+  );
   const lockBySubject = new Map(locks.map((lock) => [lock.subjectId, lock]));
   const lessonsBySubject = new Map(lessonCounts.map((row) => [row.subjectId, row._count._all]));
   const topiclessBySubject = new Map(topiclessCounts.map((row) => [row.subjectId, row._count._all]));
@@ -965,6 +1398,8 @@ export async function getQuarterCloseOverview(
     let unassessed = 0;
     let borderline = 0;
     for (const studentId of traced) {
+      // Безотметочный ученик не бывает «н/а» — у него и не должно быть оценок.
+      if (gradelessIds.has(studentId)) continue;
       const items = quarterItems.get(`${subject.id}|${studentId}`) ?? [];
       if (items.length === 0) {
         unassessed += 1;

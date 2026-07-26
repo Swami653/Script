@@ -12,19 +12,27 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useMemo, useState, useTransition } from "react";
+import { useMemo, useRef, useState, useTransition } from "react";
 
 import { ClosedStamp } from "@/components/closed-stamp";
 import { LocalDate, useLocalDateLabel } from "@/components/local-time";
 import { Flash, useFlash } from "@/components/flash";
 import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
-import { Input, Label, Select } from "@/components/ui/field";
+import { Input, Label, Select, Textarea } from "@/components/ui/field";
+import { saveQuarterNoteAction } from "@/lib/actions/gradeless";
 import {
   closeQuarterAction,
   closeQuartersBulkAction,
   reopenQuarterAction,
 } from "@/lib/actions/quarters";
+import {
+  MASTERY_LEVEL_KEYS,
+  MASTERY_LEVELS,
+  PHRASE_BANK,
+  QUARTER_NOTE_MAX_LENGTH,
+  type MasteryLevel,
+} from "@/lib/gradeless";
 import {
   averageColorClasses,
   formatAverage,
@@ -51,6 +59,21 @@ export type ReviewRowView = {
   openDebts: number;
 };
 
+/** Строка безотметочного ученика (1–2 класс) в живом расчёте мастера. */
+export type GradelessRowView = {
+  student: { id: string; name: string; className: string | null };
+  masteryCount: number;
+  levelCounts: Record<MasteryLevel, number>;
+  stampCount: number;
+  absenceCount: number;
+  /** Оценок за четверть — историческая аномалия перевода классов (обычно 0). */
+  gradeCount: number;
+  /** Характеристика выбранной четверти; null — не написана. */
+  note: string | null;
+  /** Характеристики всех четвертей 1..4 — для «взять из прошлой четверти». */
+  notes: (string | null)[];
+};
+
 export type ReviewView = {
   locked: { closedAt: string; closedByName: string } | null;
   results:
@@ -62,6 +85,10 @@ export type ReviewView = {
         finalGrade: number | null;
         gradeCount: number;
         absenceCount: number;
+        /** true — строка безотметочного ученика: «б/о», не «н/а». */
+        gradeless: boolean;
+        /** Снимок характеристики на момент закрытия. */
+        note: string | null;
       }[]
     | null;
   lessonsTotal: number;
@@ -70,6 +97,8 @@ export type ReviewView = {
   trashedCount: number;
   totalStudents: number;
   rows: ReviewRowView[];
+  gradelessRows: GradelessRowView[];
+  noteCoverage: { filled: number; total: number };
   classAverage: number | null;
   summary: ClassSummary;
 };
@@ -414,8 +443,23 @@ export function ResultsView({
             <TopiclessLessons lessons={review.lessonsWithoutTopic} journalHref={journalHref} />
           )}
 
-          {/* ── Таблица-ведомость (живой расчёт) ───────────────────────────── */}
-          <ReviewTable rows={shownRows} filtered={chip !== null} />
+          {/* ── Таблица-ведомость (живой расчёт). У чисто безотметочного
+              класса оценочная таблица не рисуется — есть блок ниже ─────────── */}
+          {(review.rows.length > 0 || review.gradelessRows.length === 0) && (
+            <ReviewTable rows={shownRows} filtered={chip !== null} />
+          )}
+
+          {/* ── Безотметочный класс: сводка и характеристики за четверть ───── */}
+          {review.gradelessRows.length > 0 && (
+            <GradelessSection
+              rows={review.gradelessRows}
+              noteCoverage={review.noteCoverage}
+              subjectId={subjectId}
+              quarter={quarter}
+              year={year}
+              onFlash={show}
+            />
+          )}
 
           {/* ── Панель закрытия ────────────────────────────────────────────── */}
           <ClosePanel
@@ -731,6 +775,182 @@ function RowFlags({ row, className }: { row: ReviewRowView; className?: string }
   );
 }
 
+/* ── Безотметочный класс: сводка уровней и характеристики за четверть ─────── */
+
+/**
+ * Блок мастера для учеников 1–2 классов: они НЕ входят в summary/classAverage
+ * и не бывают «н/а» — вместо отметки в снимок уходит словесная характеристика.
+ * Характеристика опциональна: показываем покрытие, но не требуем 100 %.
+ * Единственная точка ввода характеристик в v1 — этот шаг мастера.
+ */
+function GradelessSection({
+  rows,
+  noteCoverage,
+  subjectId,
+  quarter,
+  year,
+  onFlash,
+}: {
+  rows: GradelessRowView[];
+  noteCoverage: { filled: number; total: number };
+  subjectId: string;
+  quarter: Quarter;
+  year: number;
+  onFlash: (tone: "success" | "error", text: string) => void;
+}) {
+  return (
+    <section className="space-y-3 rounded-lg border border-rule-strong bg-card p-4">
+      <div>
+        <h2 className="text-sm font-semibold">Безотметочный класс — характеристики за четверть</h2>
+        <p className="mt-0.5 text-xs text-muted-foreground">
+          В 1–2 классах отметка не ставится: при закрытии в ведомость попадёт «б/о» и текст
+          характеристики. Заполнено{" "}
+          <span className="font-semibold tabular-nums text-foreground">
+            {noteCoverage.filled} из {noteCoverage.total}
+          </span>
+          . Сохраняется само при уходе из поля.
+        </p>
+      </div>
+
+      <ul className="divide-y divide-rule rounded-md border border-rule">
+        {rows.map((row) => (
+          <GradelessStudentRow
+            key={row.student.id}
+            row={row}
+            subjectId={subjectId}
+            quarter={quarter}
+            year={year}
+            onFlash={onFlash}
+          />
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+function GradelessStudentRow({
+  row,
+  subjectId,
+  quarter,
+  year,
+  onFlash,
+}: {
+  row: GradelessRowView;
+  subjectId: string;
+  quarter: Quarter;
+  year: number;
+  onFlash: (tone: "success" | "error", text: string) => void;
+}) {
+  const router = useRouter();
+  const [draft, setDraft] = useState(row.note ?? "");
+  const [pending, startTransition] = useTransition();
+  const savedRef = useRef(row.note ?? "");
+
+  /** Автосохранение при уходе из поля (паттерн домашки в LessonInsight). */
+  function save() {
+    if (draft.trim() === savedRef.current.trim()) return;
+    startTransition(async () => {
+      const result = await saveQuarterNoteAction({
+        studentId: row.student.id,
+        subjectId,
+        year,
+        quarter,
+        text: draft,
+      });
+      if (!result.ok) {
+        onFlash("error", `${result.status}: ${result.error}`);
+        return;
+      }
+      savedRef.current = draft;
+      onFlash("success", result.message ?? "Сохранено");
+      router.refresh();
+    });
+  }
+
+  /** Чип банка фраз дописывает текст через «; », а не заменяет его. */
+  function appendPhrase(phrase: string) {
+    setDraft((prev) => {
+      const base = prev.trim();
+      if (base.toLowerCase().includes(phrase.toLowerCase())) return prev;
+      return base ? `${base.replace(/[;.\s]+$/, "")}; ${phrase}` : phrase;
+    });
+  }
+
+  const previousNote = quarter > 1 ? (row.notes[quarter - 2] ?? null) : null;
+  const summaryParts: string[] = [];
+  if (row.masteryCount > 0) {
+    summaryParts.push(
+      MASTERY_LEVEL_KEYS.filter((level) => row.levelCounts[level] > 0)
+        .map((level) => `${MASTERY_LEVELS[level].glyph}${row.levelCounts[level]}`)
+        .join(" "),
+    );
+  }
+  summaryParts.push(`печатей ${row.stampCount}`);
+  if (row.absenceCount > 0) summaryParts.push(`Н ${row.absenceCount}`);
+
+  return (
+    <li className="space-y-2 px-3 py-2.5">
+      <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+        <Link
+          href={`/journal/students/${row.student.id}`}
+          className="focus-ring rounded text-sm font-medium hover:underline"
+        >
+          {row.student.name}
+        </Link>
+        {row.student.className && (
+          <span className="text-xs text-muted-foreground">{row.student.className}</span>
+        )}
+        <span className="text-xs tabular-nums text-muted-foreground" title="Уровни за четверть: усвоил · усваивает · нужна помощь">
+          {summaryParts.join(" · ")}
+        </span>
+        {row.gradeCount > 0 && (
+          <span
+            className="rounded bg-amber-50 px-1.5 py-0.5 text-[11px] text-amber-900 ring-1 ring-amber-200 dark:bg-amber-500/10 dark:text-amber-100 dark:ring-amber-500/30"
+            title="Оценки выставлены до перехода класса на безотметочное обучение; в снимок средний не попадёт"
+          >
+            оценок: {row.gradeCount}
+          </span>
+        )}
+        {pending && <span className="text-[11px] text-muted-foreground">сохранение…</span>}
+      </div>
+
+      <Textarea
+        value={draft}
+        onChange={(event) => setDraft(event.target.value)}
+        onBlur={save}
+        maxLength={QUARTER_NOTE_MAX_LENGTH}
+        rows={2}
+        placeholder="Характеристика за четверть: чему научился, над чем работаем…"
+        aria-label={`Характеристика: ${row.student.name}`}
+        className="min-h-[3.25rem] px-2.5 py-1.5 text-sm"
+      />
+
+      <div className="flex flex-wrap items-center gap-1">
+        {previousNote && (
+          <button
+            type="button"
+            onClick={() => setDraft(previousNote)}
+            title={previousNote}
+            className="focus-ring rounded-full border border-primary/40 px-2 py-0.5 text-[11px] font-medium text-primary transition-colors hover:bg-primary/10"
+          >
+            взять из {quarter - 1} четверти
+          </button>
+        )}
+        {PHRASE_BANK.map((phrase) => (
+          <button
+            key={phrase}
+            type="button"
+            onClick={() => appendPhrase(phrase)}
+            className="focus-ring rounded-full bg-secondary px-2 py-0.5 text-[11px] text-muted-foreground transition-colors hover:text-foreground"
+          >
+            {phrase}
+          </button>
+        ))}
+      </div>
+    </li>
+  );
+}
+
 /* ── Закрытая четверть: штамп, ведомость из снимка, переоткрытие ──────────── */
 
 /** Штамп строки списка: хук местной даты нельзя вызвать внутри map. */
@@ -767,6 +987,10 @@ function LockedSection({
   /* closedAt — настоящий момент, а не «полночь UTC» урока: закрытие в час ночи
      по Москве иначе датировалось бы вчерашним днём прямо на штампе. */
   const closedLabel = useLocalDateLabel(locked.closedAt);
+  /* Снимок делится по gradeless: оценочные — таблица с отметками, безотметочные
+     (1–2 классы) — блок «б/о» с текстом характеристики. Никогда не «н/а». */
+  const gradedResults = results.filter((row) => !row.gradeless);
+  const gradelessResults = results.filter((row) => row.gradeless);
 
   function reopen() {
     startTransition(async () => {
@@ -875,7 +1099,7 @@ function LockedSection({
             </tr>
           </thead>
           <tbody>
-            {results.map((row) => (
+            {gradedResults.map((row) => (
               <tr key={row.studentId} className="hover:bg-primary/[0.04]">
                 <th
                   scope="row"
@@ -915,16 +1139,64 @@ function LockedSection({
                 </td>
               </tr>
             ))}
-            {results.length === 0 && (
+            {gradedResults.length === 0 && (
               <tr>
                 <td colSpan={6} className="px-4 py-8 text-center text-muted-foreground">
-                  Ведомость пуста: на момент закрытия ни у кого не было ни оценки, ни «Н».
+                  {gradelessResults.length > 0
+                    ? "Оценочных учеников в ведомости нет — безотметочные строки ниже."
+                    : "Ведомость пуста: на момент закрытия ни у кого не было ни оценки, ни «Н»."}
                 </td>
               </tr>
             )}
           </tbody>
         </table>
       </div>
+
+      {/* Безотметочные строки снимка: официальный статус — «б/о» (не «н/а»),
+          документ — текст характеристики, зафиксированный при закрытии */}
+      {gradelessResults.length > 0 && (
+        <section className="space-y-2">
+          <h3 className="px-1 text-sm font-semibold">
+            Безотметочные ученики (1–2 классы) — «б/о» и характеристика
+          </h3>
+          <ul className="divide-y divide-rule overflow-hidden rounded-lg border border-rule-strong bg-card">
+            {gradelessResults.map((row) => (
+              <li key={row.studentId} className="flex items-start gap-3 px-3 py-2.5">
+                <span
+                  className="mt-0.5 inline-flex h-7 w-9 shrink-0 -rotate-3 select-none items-center justify-center rounded border-2 border-primary/60 text-[11px] font-bold uppercase text-primary"
+                  title="Безотметочное обучение: отметка не ставится"
+                >
+                  б/о
+                </span>
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-medium">
+                    {row.studentName}
+                    {row.className && (
+                      <span className="ml-1.5 text-xs font-normal text-muted-foreground">
+                        {row.className}
+                      </span>
+                    )}
+                    {row.absenceCount > 0 && (
+                      <span className="ml-1.5 text-xs font-normal tabular-nums text-muted-foreground">
+                        · Н {row.absenceCount}
+                      </span>
+                    )}
+                  </p>
+                  {row.note ? (
+                    <p className="mt-0.5 rounded bg-secondary/50 px-2 py-1 text-sm italic">
+                      {row.note}
+                    </p>
+                  ) : (
+                    <p className="mt-0.5 text-xs text-muted-foreground">
+                      Характеристика на момент закрытия не была написана.
+                    </p>
+                  )}
+                </div>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
     </div>
   );
 }
@@ -998,7 +1270,12 @@ function ClosePanel({
                 {pluralize(review.rows.length, "ученик", "ученика", "учеников")}
                 {review.summary.unassessed > 0 &&
                   `, из них «н/а» — ${review.summary.unassessed}`}
-                {review.summary.graded === 0 && " (оценок нет — вся ведомость будет «н/а»)"};
+                {review.rows.length > 0 &&
+                  review.summary.graded === 0 &&
+                  " (оценок нет — вся ведомость будет «н/а»)"}
+                {review.gradelessRows.length > 0 &&
+                  ` + ${review.gradelessRows.length} безотметочных со статусом «б/о» ` +
+                    `(характеристик ${review.noteCoverage.filled} из ${review.noteCoverage.total})`};
               </li>
             )}
             <li>ученики увидят четвертные отметки в дневнике, отметка появится и в CSV;</li>

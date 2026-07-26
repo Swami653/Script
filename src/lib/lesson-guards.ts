@@ -1,4 +1,5 @@
 import { DomainError, QuarterClosedError } from "@/lib/action-result";
+import { isGradelessClassName } from "@/lib/gradeless";
 import { prisma } from "@/lib/prisma";
 
 /**
@@ -83,4 +84,52 @@ export async function requireWritableLesson(lessonId: string): Promise<WritableL
   const lesson = await requireLiveLesson(lessonId);
   await assertQuarterOpen(lesson.subjectId, lesson.year, lesson.quarter);
   return lesson;
+}
+
+/**
+ * Политика оценивания клетки:
+ *   "graded"    — обычная оценка: безотметочному ученику (1–2 класс) — отказ;
+ *   "gradeless" — уровень/печать/характеристика: оценочному ученику — отказ;
+ *   "any"       — посещаемость и удаления: класс не проверяется.
+ */
+export type MarkPolicy = "graded" | "gradeless" | "any";
+
+/**
+ * ЕДИНСТВЕННАЯ ДВЕРЬ К УЧЕНИКУ при записи в клетку журнала (пара к
+ * requireWritableLesson). Загружает ученика, отклоняет не-учеников (404)
+ * и сверяет политику оценивания с классом (isGradelessClassName):
+ *   "graded"    — балл первокласснику невозможен (409);
+ *   "gradeless" — уровень/печать третьекласснику невозможны (409);
+ *   "any"       — «Н» универсальна, а чистка доступна всегда (иначе после
+ *                 перевода ученика между системами мусор стал бы неудаляемым).
+ * Возвращает строку ученика (имя — для logAudit, className — для доменных
+ * проверок действия). Сырой prisma.user.findUnique по ученику в
+ * src/lib/actions/* — ошибка ревью: второй путь к ученику означал бы
+ * «проверку, которую надо не забыть».
+ */
+export async function requireMarkTarget(
+  studentId: string,
+  policy: MarkPolicy,
+): Promise<{ id: string; name: string; className: string | null }> {
+  const student = await prisma.user.findUnique({
+    where: { id: studentId },
+    select: { id: true, role: true, name: true, className: true },
+  });
+  if (!student || student.role !== "STUDENT") throw new DomainError("Ученик не найден", 404);
+  if (policy !== "any") {
+    const gradeless = isGradelessClassName(student.className);
+    if (policy === "graded" && gradeless) {
+      throw new DomainError(
+        "В 1–2 классах оценки не выставляются: отметьте уровень освоения или печать",
+        409,
+      );
+    }
+    if (policy === "gradeless" && !gradeless) {
+      throw new DomainError(
+        "Уровни и печати — только для безотметочных 1–2 классов: поставьте оценку",
+        409,
+      );
+    }
+  }
+  return { id: student.id, name: student.name, className: student.className };
 }

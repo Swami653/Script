@@ -46,10 +46,20 @@ export default async function StudentCardPage({
             {formatYear(year)}
           </p>
         </div>
-        <div className="text-right">
-          <p className="text-xs text-muted-foreground">Всего оценок</p>
-          <p className="text-2xl font-bold tabular-nums">{report.totalGrades}</p>
-        </div>
+        {/* У безотметочного ученика (1–2 класс) считаем печати, а не оценки */}
+        {report.assessment === "gradeless" ? (
+          <div className="text-right">
+            <p className="text-xs text-muted-foreground">Печатей за год</p>
+            <p className="text-2xl font-bold tabular-nums text-primary">
+              {report.stampSheet.total}
+            </p>
+          </div>
+        ) : (
+          <div className="text-right">
+            <p className="text-xs text-muted-foreground">Всего оценок</p>
+            <p className="text-2xl font-bold tabular-nums">{report.totalGrades}</p>
+          </div>
+        )}
       </header>
 
       <StudentReportView

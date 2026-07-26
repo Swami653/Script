@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 import type { GridGrade, GridLesson, GridRow } from "@/app/(app)/journal/journal-grid";
+import { MASTERY_LEVELS, type MasteryLevel, type StampKind } from "@/lib/gradeless";
 import { gradeColorClasses } from "@/lib/grades";
 import { cn, formatDateShort, shortName } from "@/lib/utils";
 
@@ -27,6 +28,8 @@ export function AttendanceSheet({
   rows,
   origin,
   gradesAt,
+  masteryAt,
+  stampsAt,
   isAbsent,
   onMarkAbsent,
   onClearAbsent,
@@ -38,6 +41,10 @@ export function AttendanceSheet({
   /** Координаты якоря у столбца (десктоп) или null — нижний лист (телефон). */
   origin: { x: number; y: number } | null;
   gradesAt: (row: number, col: number) => GridGrade[];
+  /** Уровень освоения клетки (1–2 класс) — «Н» его тоже вытесняет. */
+  masteryAt: (row: number, col: number) => { level: MasteryLevel } | null;
+  /** Печати клетки (позиции; null — пусто) — вытесняются вместе с уровнем. */
+  stampsAt: (row: number, col: number) => (StampKind | null)[];
   isAbsent: (row: number, col: number) => boolean;
   onMarkAbsent: (row: number, col: number) => void;
   onClearAbsent: (row: number, col: number) => void;
@@ -69,14 +76,40 @@ export function AttendanceSheet({
 
   const absentCount = rows.reduce((sum, _, index) => sum + (isAbsent(index, col) ? 1 : 0), 0);
 
+  /** Есть ли в клетке что-то, что сотрёт отметка «Н». */
+  function hasWork(rowIndex: number): boolean {
+    return (
+      gradesAt(rowIndex, col).length > 0 ||
+      masteryAt(rowIndex, col) !== null ||
+      stampsAt(rowIndex, col).some(Boolean)
+    );
+  }
+
+  /** Что именно сотрёт «Н» — словами, чтобы учитель понимал цену второго тапа. */
+  function describeWork(rowIndex: number): string {
+    const cellGrades = gradesAt(rowIndex, col);
+    if (cellGrades.length > 0) {
+      return cellGrades.length > 1
+        ? `оценки ${cellGrades.map((grade) => grade.value).join("/")}`
+        : `оценку ${cellGrades[0]!.value}`;
+    }
+    const parts: string[] = [];
+    const mastery = masteryAt(rowIndex, col);
+    if (mastery) parts.push(`уровень «${MASTERY_LEVELS[mastery.level].label}»`);
+    const stampCount = stampsAt(rowIndex, col).filter(Boolean).length;
+    if (stampCount > 0) parts.push(stampCount > 1 ? `${stampCount} печати` : "печать");
+    return parts.join(" и ") || "отметку";
+  }
+
   function handleTap(rowIndex: number) {
     if (isAbsent(rowIndex, col)) {
       onClearAbsent(rowIndex, col);
       setConfirmRow(null);
       return;
     }
-    const grades = gradesAt(rowIndex, col);
-    if (grades.length > 0 && confirmRow !== rowIndex) {
+    /* Подтверждение нужно не только для оценок: у безотметочного ученика
+       «Н» так же молча снесёт уровень и печати — труд учителя за урок. */
+    if (hasWork(rowIndex) && confirmRow !== rowIndex) {
       setConfirmRow(rowIndex);
       return;
     }
@@ -103,7 +136,7 @@ export function AttendanceSheet({
         {rows.map((row, rowIndex) => {
           const absent = isAbsent(rowIndex, col);
           const grades = gradesAt(rowIndex, col);
-          const armed = confirmRow === rowIndex && grades.length > 0 && !absent;
+          const armed = confirmRow === rowIndex && hasWork(rowIndex) && !absent;
 
           return (
             <li key={row.studentId}>
@@ -118,10 +151,7 @@ export function AttendanceSheet({
                   <span className="block truncate text-sm">{shortName(row.name)}</span>
                   {armed && (
                     <span className="block text-[11px] font-medium text-destructive">
-                      ещё раз — сотрёт{" "}
-                      {grades.length > 1
-                        ? `оценки ${grades.map((grade) => grade.value).join("/")}`
-                        : `оценку ${grades[0]!.value}`}
+                      ещё раз — сотрёт {describeWork(rowIndex)}
                     </span>
                   )}
                 </span>

@@ -1530,6 +1530,8 @@ export function JournalGrid({
           rows={rows}
           origin={lessonPanel.origin}
           gradesAt={gradesAt}
+          masteryAt={masteryAt}
+          stampsAt={stampsAt}
           isAbsent={isAbsent}
           onMarkAbsent={markAbsent}
           onClearAbsent={clearAbsent}

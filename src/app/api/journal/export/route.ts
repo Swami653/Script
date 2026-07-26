@@ -64,9 +64,9 @@ export async function GET(request: NextRequest) {
           (
             await prisma.quarterResult.findMany({
               where: { lockId: lock.id },
-              select: { studentId: true, finalGrade: true },
+              select: { studentId: true, finalGrade: true, gradeless: true },
             })
-          ).map((row) => [row.studentId, row.finalGrade]),
+          ).map((row) => [row.studentId, row] as const),
         )
       : null;
 
@@ -122,7 +122,17 @@ export async function GET(request: NextRequest) {
            клетка: печатный документ не должен утверждать, что ученик не
            аттестован по предмету, которого у него не было. */
         ...(finals
-          ? [finals.has(row.student.id) ? (finals.get(row.student.id) ?? "н/а") : ""]
+          ? [
+              /* «н/а» — только тем, кто в ведомости ЕСТЬ и был оценочным. Строка
+                 снимка с gradeless=true — «б/о»; кого в снимке нет вовсе —
+                 пустая клетка (предмет не изучает либо заведён после закрытия). */
+              (() => {
+                const snapshot = finals.get(row.student.id);
+                if (!snapshot) return "";
+                if (snapshot.gradeless) return "б/о";
+                return snapshot.finalGrade ?? "н/а";
+              })(),
+            ]
           : []),
         row.year ?? "",
         "",

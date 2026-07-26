@@ -120,8 +120,17 @@ const quarterKeySchema = z.object({
 /** Сводка для аудита и тоста: «учеников 27, средний 7.12, качество 63%, успеваемость 96%». */
 function reviewSummaryText(review: QuarterReview): string {
   const percent = (value: number | null) => (value === null ? "—" : `${value}%`);
+  /* Безотметочных считаем ОТДЕЛЬНЫМ слагаемым, а не подмешиваем в общее число:
+     складывать их с оценочными нельзя (средний и проценты к ним неприменимы),
+     но и молчать о них тоже — предмет 1–2 класса писал бы в вечный аудит
+     «учеников 0» при полной ведомости. */
+  const gradeless = review.gradelessRows.length;
   return (
-    `учеников ${review.rows.length}, средний ${formatAverage(review.classAverage)}, ` +
+    `учеников ${review.rows.length}` +
+    (gradeless > 0
+      ? `, безотметочных ${gradeless} (характеристик ${review.noteCoverage.filled} из ${review.noteCoverage.total})`
+      : "") +
+    `, средний ${formatAverage(review.classAverage)}, ` +
     `качество ${percent(review.summary.qualityPercent)}, ` +
     `успеваемость ${percent(review.summary.passingPercent)}`
   );

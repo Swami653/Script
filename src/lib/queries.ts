@@ -389,7 +389,12 @@ export async function getJournalData(
     };
   });
 
+  /* Только оценочные строки: у безотметочного ученика среднего не существует,
+     а редкая историческая оценка (перевод 3→2) не должна попадать в средний
+     балл класса. Подвал сетки и мастер итогов считают так же — иначе шапка
+     журнала и его же подвал показывали бы разные числа. */
   const classAverages = rows
+    .filter((row) => row.assessment === "graded")
     .map((row) => row.average)
     .filter((value): value is number => value !== null);
 
@@ -415,6 +420,8 @@ export type StudentSubjectReport = {
   quarterFinals: (number | null)[];
   /** Закрыта ли четверть (есть строка снимка). Индексация как у quarterAverages. */
   closedQuarters: boolean[];
+  /** Была ли четверть безотметочной на момент закрытия: «б/о», а не «н/а». */
+  gradelessQuarters: boolean[];
   /** Пропусков по предмету за год */
   absences: number;
   year: number | null;
@@ -477,7 +484,7 @@ export async function getStudentReport(
       // Переоткрытие удаляет снимок каскадом, и отметка сама исчезает из дневника.
       prisma.quarterResult.findMany({
         where: { studentId, year },
-        select: { subjectId: true, quarter: true, finalGrade: true },
+        select: { subjectId: true, quarter: true, finalGrade: true, gradeless: true },
       }),
       // Безотметочные данные — безусловно: у оценочного ученика пусто по
       // индексу, у переведённого 2→3 история остаётся видимой.
@@ -515,15 +522,24 @@ export async function getStudentReport(
 
   const finalsBySubject = new Map<string, (number | null)[]>();
   const closedBySubject = new Map<string, boolean[]>();
+  /* Была ли четверть безотметочной НА МОМЕНТ ЗАКРЫТИЯ — читаем из снимка, а не
+     из текущего класса: ученик мог перейти 2→3 внутри года, и тогда закрытая
+     вторая четверть обязана остаться «б/о», а не превратиться в «н/а»
+     («не аттестован» — обвинение, которого не было). */
+  const gradelessClosedBySubject = new Map<string, boolean[]>();
   for (const row of finals) {
     const index = row.quarter - 1;
     if (index < 0 || index > 3) continue;
     const subjectFinals = finalsBySubject.get(row.subjectId) ?? [null, null, null, null];
     const subjectClosed = closedBySubject.get(row.subjectId) ?? [false, false, false, false];
+    const subjectGradeless =
+      gradelessClosedBySubject.get(row.subjectId) ?? [false, false, false, false];
     subjectFinals[index] = row.finalGrade;
     subjectClosed[index] = true;
+    subjectGradeless[index] = row.gradeless;
     finalsBySubject.set(row.subjectId, subjectFinals);
     closedBySubject.set(row.subjectId, subjectClosed);
+    gradelessClosedBySubject.set(row.subjectId, subjectGradeless);
   }
 
   // Уровни освоения по (предмет × четверть) — защитное чтение уровня.
@@ -580,6 +596,7 @@ export async function getStudentReport(
       quarterCounts: perQuarter.map((items) => items.length),
       quarterFinals: finalsBySubject.get(subject.id) ?? [null, null, null, null],
       closedQuarters: closedBySubject.get(subject.id) ?? [false, false, false, false],
+      gradelessQuarters: gradelessClosedBySubject.get(subject.id) ?? [false, false, false, false],
       absences: absenceBySubject.get(subject.id) ?? 0,
       // Годовая — ТОЛЬКО от живых средних четвертей (правило 1.2):
       // finalGrade — документ, в годовую он не входит.
@@ -1911,7 +1928,18 @@ export async function getQuarterCloseOverview(
   quarter: Quarter,
   year: number,
 ): Promise<QuarterCloseOverviewRow[]> {
-  const [subjects, locks, lessonCounts, topiclessCounts, grades, gradeTrace, absenceTrace, classRows] =
+  const [
+    subjects,
+    locks,
+    lessonCounts,
+    topiclessCounts,
+    grades,
+    gradeTrace,
+    absenceTrace,
+    masteryTrace,
+    stampTrace,
+    classRows,
+  ] =
     await Promise.all([
       prisma.subject.findMany({ orderBy: { name: "asc" }, select: { id: true, name: true } }),
       prisma.quarterLock.findMany({
@@ -1940,6 +1968,17 @@ export async function getQuarterCloseOverview(
         by: ["subjectId", "studentId"],
         where: { year, lesson: LIVE_LESSON },
       }),
+      // След безотметочных: уровень или печать — такой же след предмета, как
+      // оценка. Без них предмет 1–2 класса показывал бы «учеников 0» и выглядел
+      // пустым, хотя учитель весь год отмечал уровни.
+      prisma.masteryMark.groupBy({
+        by: ["subjectId", "studentId"],
+        where: { year, lesson: LIVE_LESSON },
+      }),
+      prisma.lessonStamp.groupBy({
+        by: ["subjectId", "studentId"],
+        where: { year, lesson: LIVE_LESSON },
+      }),
       // Классы учеников: безотметочные (1–2 классы) не считаются «без оценок» —
       // иначе целый первый класс блокировал бы пакетное закрытие как «н/а».
       prisma.user.findMany({
@@ -1957,9 +1996,10 @@ export async function getQuarterCloseOverview(
   const lessonsBySubject = new Map(lessonCounts.map((row) => [row.subjectId, row._count._all]));
   const topiclessBySubject = new Map(topiclessCounts.map((row) => [row.subjectId, row._count._all]));
 
-  // След за год: множество учеников предмета (оценка ИЛИ «Н» в любом периоде года).
+  // След за год: множество учеников предмета — оценка, «Н», уровень или печать
+  // в любом периоде года (тот же предикат, что в getQuarterReview).
   const tracedBySubject = new Map<string, Set<string>>();
-  for (const row of [...gradeTrace, ...absenceTrace]) {
+  for (const row of [...gradeTrace, ...absenceTrace, ...masteryTrace, ...stampTrace]) {
     const set = tracedBySubject.get(row.subjectId) ?? new Set<string>();
     set.add(row.studentId);
     tracedBySubject.set(row.subjectId, set);

@@ -108,6 +108,7 @@ export function StudentReportView({
                     const count = subject.quarterCounts[quarter - 1] ?? 0;
                     const closed = subject.closedQuarters[quarter - 1] ?? false;
                     const final = subject.quarterFinals[quarter - 1] ?? null;
+                    const gradeless = subject.gradelessQuarters[quarter - 1] ?? false;
 
                     // Закрытая четверть: официальная отметка из снимка-ведомости
                     // (чип в цветах шкалы), «н/а» — не аттестован. Открытая —
@@ -121,11 +122,19 @@ export function StudentReportView({
                               final !== null ? "text-[15px]" : "text-[11px]",
                               gradeColorClasses(final),
                             )}
-                            title={`Четвертная отметка — четверть закрыта${
-                              average !== null ? ` (средний ${formatAverage(average)})` : ""
-                            }`}
+                            title={
+                              /* «б/о» — обучение без отметок, а НЕ «не аттестован»:
+                                 второе звучит обвинением, которого не было. Флаг
+                                 берётся из снимка, поэтому переход 2→3 внутри года
+                                 не переписывает закрытую четверть задним числом. */
+                              gradeless
+                                ? "Безотметочное обучение — четвертной отметки не бывает"
+                                : `Четвертная отметка — четверть закрыта${
+                                    average !== null ? ` (средний ${formatAverage(average)})` : ""
+                                  }`
+                            }
                           >
-                            {final ?? "н/а"}
+                            {final ?? (gradeless ? "б/о" : "н/а")}
                           </span>
                         </td>
                       );

@@ -846,22 +846,28 @@ function GradelessStudentRow({
   const [pending, startTransition] = useTransition();
   const savedRef = useRef(row.note ?? "");
 
-  /** Автосохранение при уходе из поля (паттерн домашки в LessonInsight). */
-  function save() {
-    if (draft.trim() === savedRef.current.trim()) return;
+  /**
+   * Автосохранение (паттерн домашки в LessonInsight). Текст передаётся ЯВНО,
+   * а не читается из состояния: клик по чипу банка фраз сначала уводит фокус
+   * из поля — blur успевает сохранить СТАРЫЙ текст, и дописанная фраза
+   * пропадает. setDraft к тому же асинхронен, так что вызов save() сразу
+   * после него сохранил бы предыдущее значение.
+   */
+  function save(text: string = draft) {
+    if (text.trim() === savedRef.current.trim()) return;
     startTransition(async () => {
       const result = await saveQuarterNoteAction({
         studentId: row.student.id,
         subjectId,
         year,
         quarter,
-        text: draft,
+        text,
       });
       if (!result.ok) {
         onFlash("error", `${result.status}: ${result.error}`);
         return;
       }
-      savedRef.current = draft;
+      savedRef.current = text;
       onFlash("success", result.message ?? "Сохранено");
       router.refresh();
     });
@@ -869,11 +875,17 @@ function GradelessStudentRow({
 
   /** Чип банка фраз дописывает текст через «; », а не заменяет его. */
   function appendPhrase(phrase: string) {
-    setDraft((prev) => {
-      const base = prev.trim();
-      if (base.toLowerCase().includes(phrase.toLowerCase())) return prev;
-      return base ? `${base.replace(/[;.\s]+$/, "")}; ${phrase}` : phrase;
-    });
+    const base = draft.trim();
+    if (base.toLowerCase().includes(phrase.toLowerCase())) return;
+    const next = base ? `${base.replace(/[;.\s]+$/, "")}; ${phrase}` : phrase;
+    setDraft(next);
+    save(next);
+  }
+
+  /** Взять характеристику прошлой четверти — тоже сохраняем сразу. */
+  function takePrevious(text: string) {
+    setDraft(text);
+    save(text);
   }
 
   const previousNote = quarter > 1 ? (row.notes[quarter - 2] ?? null) : null;
@@ -917,7 +929,7 @@ function GradelessStudentRow({
       <Textarea
         value={draft}
         onChange={(event) => setDraft(event.target.value)}
-        onBlur={save}
+        onBlur={() => save()}
         maxLength={QUARTER_NOTE_MAX_LENGTH}
         rows={2}
         placeholder="Характеристика за четверть: чему научился, над чем работаем…"
@@ -929,7 +941,7 @@ function GradelessStudentRow({
         {previousNote && (
           <button
             type="button"
-            onClick={() => setDraft(previousNote)}
+            onClick={() => takePrevious(previousNote)}
             title={previousNote}
             className="focus-ring rounded-full border border-primary/40 px-2 py-0.5 text-[11px] font-medium text-primary transition-colors hover:bg-primary/10"
           >

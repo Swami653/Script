@@ -6,6 +6,7 @@ import { z } from "zod";
 import { actionError, actionFail, actionOk, type ActionResult } from "@/lib/action-result";
 import { lessonRef, logAudit } from "@/lib/audit";
 import { requireRole } from "@/lib/auth-guards";
+import { syncControlDebts } from "@/lib/debts";
 import {
   MASTERY_LEVELS,
   MAX_STAMPS_PER_LESSON,
@@ -243,6 +244,13 @@ export async function setMasteryAction(input: {
         (removedGrades.count > 0 ? `, снято оценок: ${removedGrades.count}` : "") +
         (removedAbsences.count > 0 ? ", снята отметка «Н»" : ""),
     });
+
+    /* Уровень вытеснил оценки и «Н» — основание авто-долга исчезло.
+       Редьюсер обязателен для ЛЮБОГО действия, меняющего клетки урока
+       (CLAUDE.md §1.4): без него у переведённого 3→2 ученика остался бы
+       открытый долг, который нечем закрыть — оценку безотметочному
+       поставить нельзя. */
+    await syncControlDebts(lesson.id);
 
     revalidatePath("/journal");
     revalidatePath("/student");

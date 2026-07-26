@@ -252,6 +252,7 @@ export default async function JournalPage({ searchParams }: { searchParams: Sear
           name: row.student.name,
           className: row.student.className,
           assessment: row.assessment,
+          hasFamily: row.hasFamily,
           cells: Object.fromEntries(
             Object.entries(row.cells).map(([lessonId, grades]) => [
               lessonId,
@@ -262,6 +263,11 @@ export default async function JournalPage({ searchParams }: { searchParams: Sear
                   weight: grade.weight,
                   kind: grade.kind,
                   comment: grade.comment,
+                  acks: grade.acks.map((ack) => ({
+                    parentName: ack.parentName,
+                    seenValue: ack.seenValue,
+                    updatedAt: ack.updatedAt.toISOString(),
+                  })),
                 })),
             ]),
           ),

@@ -19,6 +19,7 @@ import { AttendanceSheet } from "@/app/(app)/journal/attendance-sheet";
 import { LessonInsight } from "@/app/(app)/journal/lesson-insight";
 import { LevelPicker } from "@/app/(app)/journal/level-picker";
 import { Flash, useFlash } from "@/components/flash";
+import { LocalTime } from "@/components/local-time";
 import { StampSealMini } from "@/components/stamp-seal";
 import { Button } from "@/components/ui/button";
 import { clearDebtAction, markDebtAction } from "@/lib/actions/debts";
@@ -92,12 +93,22 @@ type LessonPanelState = {
   origin: { x: number; y: number } | null;
 };
 
-/** Одна оценка в клетке: значение + тип/вес/комментарий. */
+/** Штамп «Ознакомлен» на оценке — снимок для попапа клетки. */
+export type GridAck = {
+  parentName: string;
+  seenValue: number;
+  /** ISO-строка настоящего момента подписи — рендерится LocalTime. */
+  updatedAt: string;
+};
+
+/** Одна оценка в клетке: значение + тип/вес/комментарий (+подписи семьи). */
 export type GridGrade = {
   value: number;
   weight: number;
   kind: GradeKind;
   comment: string | null;
+  /** Подписи родителей; у оптимистичных оценок отсутствуют до refresh. */
+  acks?: GridAck[];
 };
 
 /** Уровень освоения клетки безотметочной строки. */
@@ -112,6 +123,8 @@ export type GridRow = {
   className: string | null;
   /** Система оценивания строки — каждая строка рендерится по СВОЕЙ. */
   assessment: Assessment;
+  /** Есть ли у ученика привязанный родитель — для трёх состояний попапа. */
+  hasFamily: boolean;
   cells: Record<string, GridGrade[]>;
   /** lessonId -> уровень освоения (безотметочные 1–2 классы). */
   mastery: Record<string, GridMastery>;
@@ -1571,6 +1584,7 @@ export function JournalGrid({
           grades={gradesAt(picker.row, picker.col)}
           absent={isAbsent(picker.row, picker.col)}
           hasDebt={debtIdAt(picker.row, picker.col) !== null}
+          hasFamily={rows[picker.row]?.hasFamily ?? false}
           studentName={rows[picker.row]?.name ?? ""}
           /* Окно НЕ закрывается: после цифры учитель дописывает «за что» и комментарий */
           onPick={(value, slot, kind, comment) =>
@@ -1700,7 +1714,10 @@ function CellContent({
 
   return (
     <span key={settleKey} className="animate-ink-settle flex items-center">
-      {grades.map((grade, index) => (
+      {grades.map((grade, index) => {
+        const acks = grade.acks ?? [];
+        const ackStale = acks.some((ack) => ack.seenValue !== grade.value);
+        return (
         <span key={index} className="flex items-center">
           {index > 0 && <span className="px-px text-[11px] text-muted-foreground">/</span>}
           <span
@@ -1709,7 +1726,14 @@ function CellContent({
               grades.length > 1 ? "w-[1.6rem] text-[13px]" : "w-9 text-[15px]",
               gradeColorClasses(grade.value),
             )}
-            title={`${GRADE_KINDS[grade.kind].label}${grade.comment ? ` — ${grade.comment}` : ""}`}
+            title={
+              `${GRADE_KINDS[grade.kind].label}${grade.comment ? ` — ${grade.comment}` : ""}` +
+              (acks.length > 0
+                ? ackStale
+                  ? " · изменена после просмотра семьёй"
+                  : " · семья видела"
+                : "")
+            }
           >
             {grade.value}
             {/* Точка — визуальная пометка контрольной, к весу отношения не имеет */}
@@ -1719,9 +1743,31 @@ function CellContent({
                 className="absolute bottom-0.5 h-[3px] w-[3px] rounded-full bg-current opacity-70"
               />
             )}
+            {/* Галочка-подпись «семья видела» — правый НИЖНИЙ угол (свободный:
+                низ по центру — КР, правый верх — комментарий). Muted, ~7px. */}
+            {acks.length > 0 && (
+              <svg
+                aria-hidden
+                viewBox="0 0 8 8"
+                className={cn(
+                  "absolute bottom-0 right-0 h-[7px] w-[7px] text-muted-foreground",
+                  ackStale ? "opacity-40" : "opacity-60",
+                )}
+              >
+                <path
+                  d="M1 4.5 L3 6.5 L7 1.5"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth={ackStale ? 1 : 1.6}
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+            )}
           </span>
         </span>
-      ))}
+        );
+      })}
     </span>
   );
 }
@@ -2264,6 +2310,7 @@ function GradePicker({
   grades,
   absent,
   hasDebt,
+  hasFamily,
   studentName,
   onPick,
   onUpdateMeta,
@@ -2280,6 +2327,8 @@ function GradePicker({
   absent: boolean;
   /** У клетки есть непрощённый долг — кнопка меняется на «Снять долг». */
   hasDebt: boolean;
+  /** У ученика есть привязанный родитель — для блока «Семья видела». */
+  hasFamily: boolean;
   studentName: string;
   onPick: (value: number, slot: number, kind: GradeKind, comment?: string) => void;
   onUpdateMeta: (kind: GradeKind, comment: string) => void;
@@ -2461,6 +2510,32 @@ function GradePicker({
         <Hourglass className="h-3.5 w-3.5" aria-hidden />
         {hasDebt ? "Снять долг" : "Долг за работу"}
       </button>
+
+      {/* Семья: три различимых состояния. Отсутствие аккаунта не должно
+          читаться как «семья игнорирует» — поэтому третье состояние явное. */}
+      {saved && (
+        <div className="mt-2 border-t border-rule pt-1.5 text-[11px] leading-snug text-muted-foreground">
+          {(() => {
+            const acks = grades.flatMap((grade) =>
+              (grade.acks ?? []).map((ack) => ({ ...ack, value: grade.value })),
+            );
+            if (acks.length > 0) {
+              return acks.map((ack, index) => (
+                <p key={index}>
+                  Семья видела: {ack.parentName}, <LocalTime iso={ack.updatedAt} />
+                  {ack.seenValue !== ack.value && (
+                    <span className="text-amber-700 dark:text-amber-300">
+                      {" "}
+                      — изменена после просмотра (семья видела {ack.seenValue})
+                    </span>
+                  )}
+                </p>
+              ));
+            }
+            return <p>{hasFamily ? "Семья ещё не видела" : "Семейный доступ не подключён"}</p>;
+          })()}
+        </div>
+      )}
 
       <div className="mt-2 flex items-center gap-1.5 border-t border-rule pt-2">
         {saved && (

@@ -33,6 +33,7 @@ export function GradelessDiary({
   subjects,
   feed,
   primary = true,
+  subjectHref = (subjectId) => `/student/subject/${subjectId}`,
 }: {
   stampSheet: StampSheet;
   subjects: StudentSubjectReport[];
@@ -43,6 +44,8 @@ export function GradelessDiary({
    * ученика (2→3): пустые секции прячутся, обещания «появятся» не даются.
    */
   primary?: boolean;
+  /** Куда ведёт предмет: у родителя — /family/child/[id]/subject/[sid]. */
+  subjectHref?: (subjectId: string) => string;
 }) {
   const kindsLine = STAMP_KIND_KEYS.filter((kind) => (stampSheet.byKind[kind] ?? 0) > 0)
     .map((kind) => `${STAMP_KINDS[kind].label} ×${stampSheet.byKind[kind]}`)
@@ -135,7 +138,7 @@ export function GradelessDiary({
               return (
                 <li key={subject.subjectId}>
                   <Link
-                    href={`/student/subject/${subject.subjectId}`}
+                    href={subjectHref(subject.subjectId)}
                     className="focus-ring block px-3 py-2.5 hover:bg-primary/[0.05]"
                   >
                     <span className="flex items-center gap-3">
@@ -227,7 +230,7 @@ export function GradelessDiary({
                   </span>
                 )}
                 <Link
-                  href={`/student/subject/${item.subject.id}`}
+                  href={subjectHref(item.subject.id)}
                   className="focus-ring flex min-w-0 flex-1 items-center gap-3 rounded"
                 >
                   <span className="min-w-0 flex-1">

@@ -13,6 +13,7 @@ import {
   asGradeKind,
   averageGrade,
   classSummary,
+  displayQuarter,
   isBorderlineAverage,
   isControlLesson,
   isGradeKind,
@@ -63,6 +64,14 @@ export type JournalLesson = {
   plannedKind: string | null;
 };
 
+/** Штамп «Ознакомлен» на оценке — снимок для попапа клетки журнала. */
+export type CellAck = {
+  parentName: string;
+  seenValue: number;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
 /** Оценка в клетке. slot: 0 — первая, 1 — вторая («10/9»). */
 export type CellGrade = {
   id: string;
@@ -71,6 +80,9 @@ export type CellGrade = {
   kind: GradeKind;
   weight: number;
   comment: string | null;
+  /** Штампы «Ознакомлен» всех родителей — «изменена после просмотра» выводится
+   *  сравнением seenValue !== value, а не хранится. */
+  acks: CellAck[];
 };
 
 export type JournalRow = {
@@ -80,6 +92,11 @@ export type JournalRow = {
    * Данные ниже отдаются независимо от неё: история переживает перевод 2→3.
    */
   assessment: Assessment;
+  /**
+   * У ученика есть хотя бы один привязанный родитель. Без него отсутствие
+   * штампа читается как «семейный доступ не подключён», а не «семья игнорирует».
+   */
+  hasFamily: boolean;
   /** lessonId -> оценки клетки, отсортированные по позиции */
   cells: Record<string, CellGrade[]>;
   /** lessonId -> уровень освоения клетки (безотметочные 1–2 классы). */
@@ -231,6 +248,35 @@ export async function getJournalData(
     }),
   ]);
 
+  // Штампы «Ознакомлен» оценок четверти и наличие семьи у учеников — для
+  // галочки-подписи в чипе и трёх состояний попапа клетки.
+  const [ackRows, familyLinks] = await Promise.all([
+    prisma.gradeAck.findMany({
+      where: { grade: { subjectId, quarter, year, lesson: LIVE_LESSON } },
+      orderBy: { updatedAt: "asc" },
+      select: {
+        gradeId: true,
+        parentName: true,
+        seenValue: true,
+        createdAt: true,
+        updatedAt: true,
+      },
+    }),
+    prisma.parentLink.groupBy({ by: ["studentId"] }),
+  ]);
+  const acksByGrade = new Map<string, CellAck[]>();
+  for (const ack of ackRows) {
+    const list = acksByGrade.get(ack.gradeId) ?? [];
+    list.push({
+      parentName: ack.parentName,
+      seenValue: ack.seenValue,
+      createdAt: ack.createdAt,
+      updatedAt: ack.updatedAt,
+    });
+    acksByGrade.set(ack.gradeId, list);
+  }
+  const withFamily = new Set(familyLinks.map((link) => link.studentId));
+
   const cellsByStudent = new Map<string, Record<string, CellGrade[]>>();
   for (const grade of gradesOfQuarter) {
     const cells = cellsByStudent.get(grade.studentId) ?? {};
@@ -242,6 +288,7 @@ export async function getJournalData(
       kind: asGradeKind(grade.kind),
       weight: grade.weight,
       comment: grade.comment,
+      acks: acksByGrade.get(grade.id) ?? [],
     });
     cells[grade.lessonId] = cell;
     cellsByStudent.set(grade.studentId, cells);
@@ -306,6 +353,7 @@ export async function getJournalData(
     return {
       student: { id: student.id, name: student.name, className: student.className },
       assessment: assessmentOf(student.className),
+      hasFamily: withFamily.has(student.id),
       cells,
       mastery: masteryByStudent.get(student.id) ?? {},
       stamps: stampsByStudent.get(student.id) ?? {},
@@ -1089,6 +1137,212 @@ export async function getParentsOverview(): Promise<ParentRow[]> {
       codeExpiresAt: liveCode?.expiresAt ?? null,
     };
   });
+}
+
+/* ── Семейный экран (родитель) ────────────────────────────────────────────── */
+
+/** Окно «что нового» для родителя, который ещё не открывал дневник: 14 дней. */
+export const FAMILY_NEW_WINDOW_DAYS = 14;
+
+export type FamilyChildCard = {
+  student: { id: string; name: string; className: string | null };
+  /** Шаблон карточки: 1–2 класс — печати и уровни, без единой цифры-оценки. */
+  assessment: Assessment;
+  /** Показываемая четверть (displayQuarter) и средний за неё. */
+  quarter: Quarter;
+  quarterAverage: number | null;
+  quarterAverages: (number | null)[];
+  /** «Новое с вашего визита»: записи с createdAt позже lastViewedAt. */
+  newGrades: number;
+  newAbsences: number;
+  newStamps: number;
+  newMastery: number;
+  /** null — дневник ещё не открывали: «новое» считается за 14 дней. */
+  lastViewedAt: Date | null;
+  /** Свежие оценки (≤5) со штампом ЭТОГО родителя. */
+  recentChips: {
+    id: string;
+    value: number;
+    kind: GradeKind;
+    comment: string | null;
+    acked: boolean;
+    ackStale: boolean;
+  }[];
+  /** Свежие печати и уровни (≤5) — карточка 1–2 класса. */
+  recentGradeless: {
+    id: string;
+    type: "stamp" | "mastery";
+    kind: StampKind | null;
+    level: MasteryLevel | null;
+    date: Date;
+  }[];
+  /** Оценок года без свежего штампа ЭТОГО родителя. */
+  unackedCount: number;
+  absences30d: number;
+  totalAbsences: number;
+  stampsYearTotal: number;
+  /** Характеристика показываемой четверти (безотметочные 1–2 классы). */
+  quarterNote: string | null;
+};
+
+/**
+ * Карточки детей для /family. Детей выводит ТОЛЬКО из ParentLink по id
+ * родителя из СЕССИИ — параметра «какие дети» не существует по построению,
+ * подменять нечего. Никаких данных класса и одноклассников здесь нет.
+ */
+export async function getFamilyOverview(
+  parent: SessionUser,
+  year: number,
+): Promise<FamilyChildCard[]> {
+  // Защита от неверного вызова с чужой страницы; периметр держит requirePageRole.
+  if (parent.role !== "PARENT") {
+    throw new ForbiddenError("Семейный экран доступен только родителю");
+  }
+
+  const links = await prisma.parentLink.findMany({
+    where: { parentId: parent.id },
+    select: {
+      lastViewedAt: true,
+      student: { select: { id: true, name: true, className: true } },
+    },
+  });
+  if (links.length === 0) return [];
+  const studentIds = links.map((link) => link.student.id);
+
+  const monthAgo = addUtcDays(todayUtcMidnight(), -30);
+  const [grades, absences, acks, stamps, mastery, notes] = await Promise.all([
+    prisma.grade.findMany({
+      where: { studentId: { in: studentIds }, year, lesson: LIVE_LESSON },
+      orderBy: [{ lesson: { date: "desc" } }, { slot: "asc" }],
+      select: {
+        id: true,
+        studentId: true,
+        value: true,
+        weight: true,
+        kind: true,
+        comment: true,
+        quarter: true,
+        createdAt: true,
+      },
+    }),
+    prisma.absence.findMany({
+      where: { studentId: { in: studentIds }, year, lesson: LIVE_LESSON },
+      select: { studentId: true, createdAt: true, lesson: { select: { date: true } } },
+    }),
+    prisma.gradeAck.findMany({
+      where: { parentId: parent.id, grade: { studentId: { in: studentIds }, year } },
+      select: { gradeId: true, seenValue: true },
+    }),
+    prisma.lessonStamp.findMany({
+      where: { studentId: { in: studentIds }, year, lesson: LIVE_LESSON },
+      orderBy: { createdAt: "desc" },
+      select: {
+        id: true,
+        studentId: true,
+        kind: true,
+        createdAt: true,
+        lesson: { select: { date: true } },
+      },
+    }),
+    prisma.masteryMark.findMany({
+      where: { studentId: { in: studentIds }, year, lesson: LIVE_LESSON },
+      orderBy: { createdAt: "desc" },
+      select: {
+        id: true,
+        studentId: true,
+        level: true,
+        createdAt: true,
+        lesson: { select: { date: true } },
+      },
+    }),
+    prisma.quarterNote.findMany({
+      where: { studentId: { in: studentIds }, year },
+      select: { studentId: true, quarter: true, text: true },
+    }),
+  ]);
+
+  const ackByGrade = new Map(acks.map((ack) => [ack.gradeId, ack.seenValue]));
+
+  return links
+    .sort((a, b) => a.student.name.localeCompare(b.student.name, "ru"))
+    .map((link) => {
+      const student = link.student;
+      // «Новое» — по реальному моменту записи (createdAt), не по дате урока:
+      // оценку за вторник учитель мог выставить в пятницу.
+      const newSince =
+        link.lastViewedAt ??
+        new Date(Date.now() - FAMILY_NEW_WINDOW_DAYS * 24 * 60 * 60 * 1000);
+
+      const ownGrades = grades.filter((grade) => grade.studentId === student.id);
+      const ownAbsences = absences.filter((absence) => absence.studentId === student.id);
+      const ownStamps = stamps.filter((stamp) => stamp.studentId === student.id);
+      const ownMastery = mastery.filter((mark) => mark.studentId === student.id);
+
+      const perQuarter: { value: number; weight: number }[][] = [[], [], [], []];
+      for (const grade of ownGrades) {
+        const index = grade.quarter - 1;
+        if (index >= 0 && index < 4)
+          perQuarter[index]!.push({ value: grade.value, weight: grade.weight });
+      }
+      const quarterAverages = perQuarter.map((items) => weightedAverage(items));
+      const quarter = displayQuarter(quarterAverages);
+
+      const noteRow = notes.find(
+        (note) => note.studentId === student.id && note.quarter === quarter,
+      );
+
+      const recentGradeless = [
+        ...ownStamps.map((stamp) => ({
+          id: stamp.id,
+          type: "stamp" as const,
+          kind: asStampKind(stamp.kind),
+          level: null,
+          date: stamp.lesson.date,
+          createdAt: stamp.createdAt,
+        })),
+        ...ownMastery
+          .filter((mark) => asMasteryLevel(mark.level) !== null)
+          .map((mark) => ({
+            id: mark.id,
+            type: "mastery" as const,
+            kind: null,
+            level: asMasteryLevel(mark.level),
+            date: mark.lesson.date,
+            createdAt: mark.createdAt,
+          })),
+      ]
+        .sort((a, b) => b.date.getTime() - a.date.getTime())
+        .slice(0, 5)
+        .map(({ createdAt: _createdAt, ...item }) => item);
+
+      return {
+        student,
+        assessment: assessmentOf(student.className),
+        quarter,
+        quarterAverage: quarterAverages[quarter - 1] ?? null,
+        quarterAverages,
+        newGrades: ownGrades.filter((grade) => grade.createdAt > newSince).length,
+        newAbsences: ownAbsences.filter((absence) => absence.createdAt > newSince).length,
+        newStamps: ownStamps.filter((stamp) => stamp.createdAt > newSince).length,
+        newMastery: ownMastery.filter((mark) => mark.createdAt > newSince).length,
+        lastViewedAt: link.lastViewedAt,
+        recentChips: ownGrades.slice(0, 5).map((grade) => ({
+          id: grade.id,
+          value: grade.value,
+          kind: asGradeKind(grade.kind),
+          comment: grade.comment,
+          acked: ackByGrade.has(grade.id),
+          ackStale: ackByGrade.has(grade.id) && ackByGrade.get(grade.id) !== grade.value,
+        })),
+        recentGradeless,
+        unackedCount: ownGrades.filter((grade) => ackByGrade.get(grade.id) !== grade.value)
+          .length,
+        absences30d: ownAbsences.filter((absence) => absence.lesson.date >= monthAgo).length,
+        totalAbsences: ownAbsences.length,
+        stampsYearTotal: ownStamps.length,
+        quarterNote: noteRow?.text ?? null,
+      };
+    });
 }
 
 export async function getAllUsers() {

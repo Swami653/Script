@@ -10,10 +10,16 @@ import { cn } from "@/lib/utils";
 const HOVER_OPEN_DELAY = 120;
 
 /**
- * Чип оценки в дневнике ученика. Конвенция двух точек (см. DESIGN.md):
- * точка снизу по центру токовым цветом — «контрольная», точка в правом
- * верхнем углу цветом --primary — «есть комментарий учителя». Обе точки
- * могут стоять одновременно.
+ * Чип оценки в дневнике ученика. Язык данных чипа — ТРИ метки (см. DESIGN.md),
+ * палитрой интерфейса они не переопределяются:
+ *  * точка снизу по центру токовым цветом — «контрольная»;
+ *  * точка в правом верхнем углу цветом --primary — «есть комментарий учителя»;
+ *  * галочка-подпись в правом НИЖНЕМ углу (muted, ~7px) — «семья видела».
+ * Все три могут стоять одновременно — углы не пересекаются.
+ *
+ * acked/ackStale приходят с сервера (GradeAck): stale означает «оценка
+ * изменена после подписи» — галочка меняется на полую, чтобы не выдавать
+ * старую подпись за свежую.
  *
  * Без комментария — обычный span (не фокусируемый, title с типом работы).
  * С комментарием — кнопка с попапом: hover (задержка) и focus на десктопе,
@@ -24,11 +30,17 @@ export function GradeChip({
   value,
   kind,
   comment,
+  acked = false,
+  ackStale = false,
   className,
 }: {
   value: number;
   kind: GradeKind;
   comment: string | null;
+  /** Есть штамп «Ознакомлен» (в родительском UI — подпись зрителя). */
+  acked?: boolean;
+  /** Подпись есть, но оценка изменена после неё (seenValue !== value). */
+  ackStale?: boolean;
   className?: string;
 }) {
   const chipClasses = cn(
@@ -43,12 +55,19 @@ export function GradeChip({
         className="absolute bottom-0.5 left-1/2 h-[3px] w-[3px] -translate-x-1/2 rounded-full bg-current opacity-70"
       />
     ) : null;
+  const ackMark = acked ? <AckSignature stale={ackStale} /> : null;
 
   if (!comment) {
     return (
-      <span className={chipClasses} title={GRADE_KINDS[kind].label}>
+      <span
+        className={chipClasses}
+        title={`${GRADE_KINDS[kind].label}${
+          acked ? (ackStale ? " · изменена после просмотра семьёй" : " · семья видела") : ""
+        }`}
+      >
         {value}
         {controlDot}
+        {ackMark}
       </span>
     );
   }
@@ -60,7 +79,35 @@ export function GradeChip({
       comment={comment}
       chipClasses={chipClasses}
       controlDot={controlDot}
+      ackMark={ackMark}
     />
+  );
+}
+
+/**
+ * Галочка-подпись «семья видела» — правый нижний угол чипа, ~7px,
+ * muted-foreground с opacity 0.6 (не конкурирует с точками КР и комментария).
+ * stale — полая (stroke без заливки фона «прочитано свежее»).
+ */
+function AckSignature({ stale }: { stale: boolean }) {
+  return (
+    <svg
+      aria-hidden
+      viewBox="0 0 8 8"
+      className={cn(
+        "absolute bottom-0 right-0 h-[7px] w-[7px] text-muted-foreground",
+        stale ? "opacity-40" : "opacity-60",
+      )}
+    >
+      <path
+        d="M1 4.5 L3 6.5 L7 1.5"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth={stale ? 1 : 1.6}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
   );
 }
 
@@ -70,12 +117,14 @@ function CommentedChip({
   comment,
   chipClasses,
   controlDot,
+  ackMark,
 }: {
   value: number;
   kind: GradeKind;
   comment: string;
   chipClasses: string;
   controlDot: React.ReactNode;
+  ackMark: React.ReactNode;
 }) {
   const buttonRef = useRef<HTMLButtonElement>(null);
   const popupRef = useRef<HTMLDivElement>(null);
@@ -165,6 +214,7 @@ function CommentedChip({
           {GRADE_KINDS[kind].label}. Комментарий: {comment}
         </span>
         {controlDot}
+        {ackMark}
         {/* Точка комментария — правый верхний угол, цвет --primary */}
         <span
           aria-hidden

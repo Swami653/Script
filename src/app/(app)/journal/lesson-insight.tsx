@@ -2,7 +2,7 @@
 
 import { ClipboardCopy } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useEffect, useRef, useState, useTransition } from "react";
+import { useCallback, useEffect, useRef, useState, useTransition } from "react";
 import { createPortal } from "react-dom";
 
 import type { GridLesson } from "@/app/(app)/journal/journal-grid";
@@ -61,12 +61,35 @@ export function LessonInsight({
 
   useEffect(() => setMounted(true), []);
 
+  /* Свежий черновик для обработчиков закрытия: слушатели вешаются один раз,
+     а текст задания к моменту закрытия уже другой. */
+  const draftRef = useRef({ text: draft, saved: lesson.homework ?? "", id: lesson.id });
+  draftRef.current = { text: draft, saved: lesson.homework ?? "", id: lesson.id };
+
+  /**
+   * Закрытие любым способом сначала досохраняет задание.
+   *
+   * Учитель печатает «§12, №431» и кликает мимо панели — текст обязан
+   * сохраниться, а не исчезнуть. Кнопка «Сохранить» остаётся для явного
+   * подтверждения, но не является единственным способом не потерять работу.
+   */
+  const closeWithSave = useCallback(() => {
+    const { text, saved, id } = draftRef.current;
+    if (text.trim() !== saved) {
+      void setLessonHomeworkAction({ lessonId: id, homework: text }).then((result) => {
+        if (!result.ok) onFlash("error", `${result.status}: ${result.error}`);
+        else router.refresh();
+      });
+    }
+    onClose();
+  }, [onClose, onFlash, router]);
+
   useEffect(() => {
     function handlePointerDown(event: PointerEvent) {
-      if (panelRef.current && !panelRef.current.contains(event.target as Node)) onClose();
+      if (panelRef.current && !panelRef.current.contains(event.target as Node)) closeWithSave();
     }
     function handleKey(event: KeyboardEvent) {
-      if (event.key === "Escape") onClose();
+      if (event.key === "Escape") closeWithSave();
     }
     document.addEventListener("pointerdown", handlePointerDown);
     document.addEventListener("keydown", handleKey);
@@ -74,7 +97,7 @@ export function LessonInsight({
       document.removeEventListener("pointerdown", handlePointerDown);
       document.removeEventListener("keydown", handleKey);
     };
-  }, [onClose]);
+  }, [closeWithSave]);
 
   if (!mounted) return null;
 
@@ -319,7 +342,7 @@ export function LessonInsight({
       <div className="border-t border-rule p-2">
         <button
           type="button"
-          onClick={onClose}
+          onClick={closeWithSave}
           className="focus-ring flex h-10 w-full items-center justify-center rounded-md bg-secondary text-sm font-semibold transition-colors hover:bg-accent"
         >
           Готово

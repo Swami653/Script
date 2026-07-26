@@ -66,7 +66,14 @@ export default async function StudentSubjectPage({
         row.date < upcomingHorizon && (row.topic || row.homework || row.plannedKind),
     )
     .slice(0, 5);
-  const upcomingRest = detail.upcoming.length - upcomingShown.length;
+  /* Остаток считаем по ТОЙ ЖЕ четверти, что и показанные уроки: иначе подпись
+     «до конца четверти» врала бы, складывая будущие уроки всего года. */
+  const scopeQuarter = upcomingShown[0]?.quarter;
+  const upcomingRest =
+    scopeQuarter === undefined
+      ? 0
+      : detail.upcoming.filter((row) => row.quarter === scopeQuarter).length -
+        upcomingShown.length;
 
   return (
     <div className="mx-auto max-w-3xl space-y-5">
@@ -257,7 +264,12 @@ export default async function StudentSubjectPage({
           <CalendarDays className="mx-auto mb-2 h-6 w-6 text-muted-foreground" aria-hidden />
           <p className="text-sm font-medium">По этому предмету ещё не было уроков</p>
           <p className="mt-1 text-sm text-muted-foreground">
-            Как только учитель добавит урок, он появится здесь вместе с темой и оценкой.
+            {/* Уроки уже могут быть заведены наперёд «сеткой на четверть» —
+                тогда обещать «как только учитель добавит урок» нельзя: он их
+                уже добавил, просто они ещё не прошли. */}
+            {detail.upcoming.length > 0
+              ? "Уроки уже запланированы — оценки появятся после первого урока."
+              : "Как только учитель добавит урок, он появится здесь вместе с темой и оценкой."}
           </p>
         </div>
       )}

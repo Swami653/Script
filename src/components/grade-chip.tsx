@@ -140,7 +140,13 @@ function CommentedChip({
           hoveredByMouse.current = false;
           close();
         }}
-        onFocus={open}
+        onFocus={(event) => {
+          /* Тап на Android ставит фокус на кнопку, и открытие по фокусу
+             схлопывалось бы последующим click-переключением — попап мигал
+             и закрывался, комментарий читался только со второго тапа.
+             Клавиатурный фокус (:focus-visible) такого конфликта не даёт. */
+          if (event.target.matches(":focus-visible")) open();
+        }}
         onBlur={close}
         onClick={() => {
           // Мышь уже открыла попап наведением — клик его не переключает.

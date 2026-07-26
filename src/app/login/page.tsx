@@ -1,87 +1,163 @@
-import { GraduationCap, ShieldCheck } from "lucide-react";
 import type { Metadata } from "next";
 import { redirect } from "next/navigation";
 
 import { LoginForm } from "@/app/login/login-form";
 import { getCurrentUser } from "@/lib/auth-guards";
+import { academicYearLabel, gradeColorClasses } from "@/lib/grades";
 import { ROLE_HOME } from "@/lib/roles";
+import { cn } from "@/lib/utils";
 
 export const metadata: Metadata = { title: "Вход" };
+
+/**
+ * Разворот журнала на экране входа — не иллюстрация, а то, чем продукт является.
+ * Данные показательные и подписаны как образец: настоящих оценок здесь быть не может,
+ * пользователь ещё не вошёл.
+ */
+const SAMPLE_ROWS: { name: string; grades: (number | null)[] }[] = [
+  { name: "Иванова М. П.", grades: [10, 9, null, 10, 9] },
+  { name: "Козлова А. А.", grades: [8, 8, 9, null, 8] },
+  { name: "Новиков Е. М.", grades: [6, null, 5, 7, 6] },
+  { name: "Петров Д. С.", grades: [7, 6, 8, 7, null] },
+  { name: "Сидорова П. О.", grades: [9, 10, 10, 9, 10] },
+];
+
+const SAMPLE_DATES = ["02.09", "09.09", "16.09", "23.09", "30.09"];
 
 export default async function LoginPage() {
   const user = await getCurrentUser();
   if (user) redirect(ROLE_HOME[user.role]);
 
   return (
-    <main className="relative flex min-h-screen items-center justify-center overflow-hidden px-4 py-10">
-      <div
-        aria-hidden
-        className="pointer-events-none absolute inset-0 bg-[radial-gradient(60rem_40rem_at_50%_-10%,hsl(var(--primary)/0.16),transparent)]"
-      />
-
-      <div className="relative grid w-full max-w-4xl gap-8 lg:grid-cols-[1.1fr_1fr] lg:items-center">
-        <section className="hidden lg:block">
-          <div className="mb-5 inline-flex items-center gap-2 rounded-full border border-border bg-card px-3 py-1 text-xs font-medium text-muted-foreground">
-            <ShieldCheck className="h-3.5 w-3.5" aria-hidden />
-            Проверка прав выполняется на сервере
-          </div>
-          <h1 className="text-4xl font-bold tracking-tight">
-            Электронный журнал
-            <span className="block text-primary">вашей школы</span>
+    <main className="flex min-h-screen flex-col lg:flex-row">
+      {/* Левый разворот — «бумага» */}
+      <section className="ledger-paper relative hidden flex-1 border-r border-rule-strong px-10 py-12 lg:flex lg:flex-col lg:justify-center xl:px-16">
+        <div className="max-w-xl">
+          <p className="text-xs font-semibold uppercase tracking-[0.2em] text-muted-foreground">
+            {academicYearLabel()} учебный год
+          </p>
+          <h1 className="mt-3 text-[3.25rem] font-extrabold leading-[0.95] tracking-[-0.03em]">
+            Классный
+            <br />
+            журнал,
+            <br />
+            <span className="text-primary">который считает</span>
+            <br />
+            сам.
           </h1>
-          <p className="mt-4 max-w-md text-muted-foreground">
-            10-балльная система оценок, четыре учебные четверти, автоматический расчёт
-            средних баллов и годовых оценок.
+          <p className="mt-5 max-w-md text-[15px] leading-relaxed text-muted-foreground">
+            Десятибалльные оценки, четыре четверти, средний балл до сотых и годовая
+            оценка — пересчитываются в тот момент, когда вы ставите цифру в клетку.
           </p>
 
-          <dl className="mt-8 grid grid-cols-3 gap-4">
-            {[
-              { term: "10", desc: "балльная система" },
-              { term: "4", desc: "учебные четверти" },
-              { term: "3", desc: "роли пользователей" },
-            ].map((item) => (
-              <div key={item.desc} className="rounded-xl border border-border bg-card p-4">
-                <dt className="text-2xl font-bold text-primary">{item.term}</dt>
-                <dd className="mt-1 text-xs text-muted-foreground">{item.desc}</dd>
-              </div>
-            ))}
-          </dl>
-        </section>
-
-        <section className="rounded-2xl border border-border bg-card p-6 shadow-lg sm:p-8">
-          <div className="mb-6 flex items-center gap-3">
-            <span className="flex h-11 w-11 items-center justify-center rounded-xl bg-primary text-primary-foreground">
-              <GraduationCap className="h-6 w-6" aria-hidden />
-            </span>
-            <div>
-              <h2 className="text-lg font-semibold leading-tight">Вход в журнал</h2>
-              <p className="text-sm text-muted-foreground">Введите выданные вам данные</p>
+          <figure className="mt-9">
+            <div className="overflow-hidden rounded-lg border border-rule-strong bg-card shadow-sm">
+              <table className="w-full border-collapse text-sm">
+                <thead>
+                  <tr>
+                    <th
+                      scope="col"
+                      className="border-b-2 border-r border-rule-strong px-3 py-1.5 text-left text-[11px] font-semibold uppercase tracking-wide text-muted-foreground"
+                    >
+                      Ученик
+                    </th>
+                    {SAMPLE_DATES.map((date) => (
+                      <th
+                        key={date}
+                        scope="col"
+                        className="w-12 border-b-2 border-rule-strong px-0 py-1.5 text-center text-[12px] font-medium tabular-nums"
+                      >
+                        {date}
+                      </th>
+                    ))}
+                    <th
+                      scope="col"
+                      className="w-16 border-b-2 border-l border-rule-strong bg-secondary/40 px-2 py-1.5 text-center text-[11px] font-semibold uppercase tracking-wide text-muted-foreground"
+                    >
+                      Средний
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {SAMPLE_ROWS.map((row) => {
+                    const filled = row.grades.filter((g): g is number => g !== null);
+                    const average = filled.reduce((a, b) => a + b, 0) / filled.length;
+                    return (
+                      <tr key={row.name}>
+                        <th
+                          scope="row"
+                          className="border-b border-r border-rule px-3 py-0 text-left font-normal shadow-[inset_3px_0_0_hsl(var(--spine))]"
+                        >
+                          <span className="flex h-8 items-center">{row.name}</span>
+                        </th>
+                        {row.grades.map((grade, index) => (
+                          <td
+                            key={`${row.name}-${index}`}
+                            className="border-b border-rule px-0 py-0.5 text-center"
+                          >
+                            <span
+                              className={cn(
+                                "mx-auto flex h-7 w-9 items-center justify-center rounded text-[15px] font-semibold tabular-nums",
+                                grade === null ? "text-transparent" : gradeColorClasses(grade),
+                              )}
+                            >
+                              {grade ?? "·"}
+                            </span>
+                          </td>
+                        ))}
+                        <td className="border-b border-l border-rule-strong bg-secondary/30 px-2 text-center text-[15px] font-semibold tabular-nums">
+                          {average.toFixed(2)}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
             </div>
-          </div>
+            <figcaption className="mt-2 text-xs text-muted-foreground">
+              Образец разворота: 1 четверть, средний балл пересчитан автоматически.
+            </figcaption>
+          </figure>
+        </div>
+      </section>
+
+      {/* Правая страница — вход */}
+      <section className="flex flex-1 items-center justify-center bg-background px-5 py-10 lg:max-w-[30rem]">
+        <div className="w-full max-w-sm">
+          <h2 className="text-2xl font-bold tracking-tight lg:hidden">Электронный журнал</h2>
+          <p className="mb-8 mt-1 text-sm text-muted-foreground lg:hidden">
+            10-балльная система · 4 четверти
+          </p>
+
+          <h2 className="hidden text-xl font-bold tracking-tight lg:block">Вход в журнал</h2>
+          <p className="mb-7 mt-1 hidden text-sm text-muted-foreground lg:block">
+            Логин и пароль выдаёт администратор школы.
+          </p>
 
           <LoginForm />
 
-          <div className="mt-6 rounded-lg border border-dashed border-border bg-muted/40 p-3">
-            <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+          <div className="mt-8 border-t border-rule pt-5">
+            <p className="mb-2.5 text-[11px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">
               Демонстрационные аккаунты
             </p>
-            <ul className="space-y-1 text-xs text-muted-foreground">
-              <li>
-                <span className="font-medium text-foreground">Администратор:</span>{" "}
-                admin@school.com / admin123
-              </li>
-              <li>
-                <span className="font-medium text-foreground">Учитель:</span>{" "}
-                teacher@school.com / teacher123
-              </li>
-              <li>
-                <span className="font-medium text-foreground">Ученик:</span>{" "}
-                student@school.com / student123
-              </li>
-            </ul>
+            <dl className="space-y-1.5 text-[13px]">
+              {[
+                ["Администратор", "admin@school.com", "admin123"],
+                ["Учитель", "teacher@school.com", "teacher123"],
+                ["Ученик", "student@school.com", "student123"],
+              ].map(([role, email, password]) => (
+                <div key={role} className="flex items-baseline justify-between gap-3">
+                  <dt className="text-muted-foreground">{role}</dt>
+                  <dd className="text-right tabular-nums">
+                    <span className="font-medium">{email}</span>
+                    <span className="text-muted-foreground"> · {password}</span>
+                  </dd>
+                </div>
+              ))}
+            </dl>
           </div>
-        </section>
-      </div>
+        </div>
+      </section>
     </main>
   );
 }

@@ -1,9 +1,9 @@
-import { GraduationCap } from "lucide-react";
 import Link from "next/link";
 
 import { LogoutButton, NavLinks, ThemeToggle } from "@/components/app-nav";
 import { RoleBadge } from "@/components/ui/badge";
 import { requirePageUser } from "@/lib/auth-guards";
+import { academicYearLabel } from "@/lib/grades";
 import { ROLE_HOME, type Role } from "@/lib/roles";
 import { initials } from "@/lib/utils";
 
@@ -29,18 +29,24 @@ export default async function AppLayout({ children }: { children: React.ReactNod
 
   return (
     <div className="flex min-h-screen flex-col">
-      <header className="sticky top-0 z-40 border-b border-border bg-card/85 backdrop-blur supports-[backdrop-filter]:bg-card/70">
+      <header className="sticky top-0 z-40 border-b border-rule-strong bg-card/90 backdrop-blur supports-[backdrop-filter]:bg-card/75">
         <div className="mx-auto flex h-16 w-full max-w-[1600px] items-center gap-4 px-4 sm:px-6">
           <Link
             href={ROLE_HOME[user.role]}
             className="focus-ring flex items-center gap-2 rounded-md"
           >
-            <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary text-primary-foreground">
-              <GraduationCap className="h-5 w-5" aria-hidden />
+            {/* Знак — корешок журнала с закладкой: тот же приём, что и в сетке */}
+            <span
+              aria-hidden
+              className="flex h-9 w-8 flex-col justify-between rounded-sm bg-primary px-1 py-1 shadow-[inset_3px_0_0_hsl(var(--primary-foreground)/0.35)]"
+            >
+              <span className="h-[2px] w-full rounded-full bg-primary-foreground/70" />
+              <span className="h-[2px] w-full rounded-full bg-primary-foreground/70" />
+              <span className="h-[2px] w-3/5 rounded-full bg-primary-foreground/70" />
             </span>
-            <span className="hidden text-sm font-semibold leading-tight sm:block">
-              Электронный
-              <span className="block text-muted-foreground">журнал</span>
+            <span className="hidden text-sm font-bold leading-tight tracking-tight sm:block">
+              Классный
+              <span className="block font-medium text-muted-foreground">журнал</span>
             </span>
           </Link>
 
@@ -67,15 +73,15 @@ export default async function AppLayout({ children }: { children: React.ReactNod
           </div>
         </div>
 
-        <div className="border-t border-border px-4 py-2 md:hidden">
+        <div className="border-t border-rule px-4 py-2 md:hidden">
           <NavLinks items={navItems} className="overflow-x-auto" />
         </div>
       </header>
 
       <main className="mx-auto w-full max-w-[1600px] flex-1 px-4 py-6 sm:px-6">{children}</main>
 
-      <footer className="border-t border-border py-4 text-center text-xs text-muted-foreground">
-        Электронный журнал · 10-балльная система · 4 четверти
+      <footer className="border-t border-rule py-4 text-center text-xs text-muted-foreground">
+        {academicYearLabel()} учебный год
       </footer>
     </div>
   );

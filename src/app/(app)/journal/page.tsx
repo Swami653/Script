@@ -1,12 +1,12 @@
-import { BookOpen, TrendingUp, Users } from "lucide-react";
+import { BookOpen } from "lucide-react";
 import type { Metadata } from "next";
 import Link from "next/link";
 
 import { JournalGrid } from "@/app/(app)/journal/journal-grid";
 import { JournalToolbar } from "@/app/(app)/journal/journal-toolbar";
-import { Card, CardContent } from "@/components/ui/card";
 import { requirePageRole } from "@/lib/auth-guards";
 import {
+  academicYearLabel,
   averageColorClasses,
   formatAverage,
   guessCurrentQuarter,
@@ -21,6 +21,7 @@ import {
   getSubjects,
 } from "@/lib/queries";
 import { GRADE_EDITOR_ROLES } from "@/lib/roles";
+import { pluralize } from "@/lib/utils";
 
 export const metadata: Metadata = { title: "Журнал класса" };
 
@@ -56,26 +57,41 @@ export default async function JournalPage({ searchParams }: { searchParams: Sear
   const data = await getJournalData(subjectId, quarter, className);
 
   return (
-    <div className="space-y-5">
-      <header className="flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight">Журнал класса</h1>
-          <p className="mt-1 text-sm text-muted-foreground">
-            {subjectName} · {QUARTER_LABELS[quarter]}
+    <div className="space-y-4">
+      <header>
+        <p className="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">
+          {academicYearLabel()} учебный год
+        </p>
+        <h1 className="mt-1 text-[1.75rem] font-extrabold leading-tight tracking-tight">
+          {subjectName}
+          <span className="ml-2 align-middle text-base font-medium text-muted-foreground">
+            {QUARTER_LABELS[quarter]}
             {className ? ` · ${className}` : ""}
-          </p>
-        </div>
-
-        <div className="grid grid-cols-3 gap-3">
-          <StatChip icon={Users} label="Учеников" value={String(data.rows.length)} />
-          <StatChip icon={BookOpen} label="Уроков" value={String(data.lessons.length)} />
-          <StatChip
-            icon={TrendingUp}
-            label="Средний класса"
-            value={formatAverage(data.classAverage)}
-            valueClassName={averageColorClasses(data.classAverage)}
-          />
-        </div>
+          </span>
+        </h1>
+        {/* Итоги строкой, а не рядом одинаковых карточек-метрик */}
+        <p className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-muted-foreground">
+          <span>
+            <span className="font-semibold tabular-nums text-foreground">{data.rows.length}</span>{" "}
+            {pluralize(data.rows.length, "ученик", "ученика", "учеников")}
+          </span>
+          <span aria-hidden>·</span>
+          <span>
+            <span className="font-semibold tabular-nums text-foreground">
+              {data.lessons.length}
+            </span>{" "}
+            {pluralize(data.lessons.length, "урок", "урока", "уроков")}
+          </span>
+          <span aria-hidden>·</span>
+          <span>
+            средний балл класса{" "}
+            <span
+              className={`font-semibold tabular-nums ${averageColorClasses(data.classAverage)}`}
+            >
+              {formatAverage(data.classAverage)}
+            </span>
+          </span>
+        </p>
       </header>
 
       <JournalToolbar
@@ -118,37 +134,9 @@ async function defaultQuarter(subjectId: string): Promise<Quarter> {
   return isValidQuarter(last) ? (last as Quarter) : guess;
 }
 
-function StatChip({
-  icon: Icon,
-  label,
-  value,
-  valueClassName,
-}: {
-  icon: React.ElementType;
-  label: string;
-  value: string;
-  valueClassName?: string;
-}) {
-  return (
-    <Card className="min-w-[110px]">
-      <CardContent className="flex items-center gap-2.5 p-3">
-        <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
-          <Icon className="h-4 w-4" aria-hidden />
-        </span>
-        <span className="leading-tight">
-          <span className="block text-[11px] text-muted-foreground">{label}</span>
-          <span className={`block text-base font-bold tabular-nums ${valueClassName ?? ""}`}>
-            {value}
-          </span>
-        </span>
-      </CardContent>
-    </Card>
-  );
-}
-
 function EmptyState({ title, description }: { title: string; description: string }) {
   return (
-    <div className="mx-auto max-w-lg rounded-xl border border-dashed border-border bg-card p-10 text-center">
+    <div className="mx-auto max-w-lg rounded-lg border border-dashed border-rule-strong bg-card p-10 text-center">
       <BookOpen className="mx-auto mb-3 h-8 w-8 text-muted-foreground" aria-hidden />
       <h1 className="text-lg font-semibold">{title}</h1>
       <p className="mt-1 text-sm text-muted-foreground">{description}</p>

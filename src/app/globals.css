@@ -2,46 +2,76 @@
 @tailwind components;
 @tailwind utilities;
 
+/**
+ * Визуальный мир проекта — «классный журнал»: тёплая бумага, чернильный текст,
+ * карандашная линовка. Цвета оценок (шкала 1–10) живут отдельно, в grades.ts:
+ * это данные, а не фирменный стиль, и они не подчиняются акцентному цвету.
+ */
+
 @layer base {
   :root {
-    --background: 210 40% 98%;
-    --foreground: 222 47% 11%;
-    --card: 0 0% 100%;
-    --card-foreground: 222 47% 11%;
-    --primary: 221 83% 53%;
-    --primary-foreground: 210 40% 98%;
-    --secondary: 210 40% 96%;
-    --secondary-foreground: 222 47% 11%;
-    --muted: 210 40% 96%;
-    --muted-foreground: 215 16% 47%;
-    --accent: 210 40% 94%;
-    --accent-foreground: 222 47% 11%;
-    --destructive: 0 72% 51%;
-    --destructive-foreground: 210 40% 98%;
-    --border: 214 32% 91%;
-    --input: 214 32% 91%;
-    --ring: 221 83% 53%;
-    --radius: 0.75rem;
+    color-scheme: light;
+
+    /* Бумага и чернила */
+    --background: 40 30% 95%;         /* #F7F5F0 — тёплая бумага */
+    --foreground: 218 30% 15%;        /* #1B2432 — чернила */
+    --card: 40 45% 99%;               /* #FEFDFB — лист журнала */
+    --card-foreground: 218 30% 15%;
+
+    /* Ink blue — единственный акцент: действия, выбор, фокус */
+    --primary: 213 47% 33%;           /* #2C4A7C */
+    --primary-foreground: 40 45% 99%;
+
+    --secondary: 40 22% 91%;
+    --secondary-foreground: 218 30% 15%;
+    --muted: 40 22% 92%;
+    --muted-foreground: 35 8% 40%;    /* тёплый серый, не «gray-on-gray» */
+    --accent: 40 25% 89%;
+    --accent-foreground: 218 30% 15%;
+
+    --destructive: 8 68% 39%;         /* красная ручка */
+    --destructive-foreground: 40 45% 99%;
+
+    --border: 40 20% 85%;             /* #E2DCCF — карандашная линовка */
+    --input: 40 20% 80%;
+    --ring: 213 47% 33%;
+
+    /* Линовка сетки журнала */
+    --rule: 40 18% 82%;
+    --rule-strong: 40 16% 68%;
+    --spine: 35 25% 78%;              /* «корешок» у колонки с ФИО */
+
+    --radius: 0.625rem;
   }
 
   .dark {
-    --background: 222 47% 7%;
-    --foreground: 210 40% 96%;
-    --card: 222 44% 11%;
-    --card-foreground: 210 40% 96%;
-    --primary: 217 91% 60%;
-    --primary-foreground: 222 47% 11%;
-    --secondary: 217 33% 17%;
-    --secondary-foreground: 210 40% 96%;
-    --muted: 217 33% 17%;
-    --muted-foreground: 215 20% 65%;
-    --accent: 217 33% 20%;
-    --accent-foreground: 210 40% 96%;
-    --destructive: 0 63% 50%;
-    --destructive-foreground: 210 40% 98%;
-    --border: 217 33% 20%;
-    --input: 217 33% 22%;
-    --ring: 217 91% 60%;
+    color-scheme: dark;
+
+    --background: 220 26% 10%;        /* #12161F — вечер, настольная лампа */
+    --foreground: 40 25% 91%;         /* тёплый белый, не чисто-белый */
+    --card: 220 24% 13%;
+    --card-foreground: 40 25% 91%;
+
+    --primary: 214 60% 66%;
+    --primary-foreground: 220 26% 10%;
+
+    --secondary: 220 18% 20%;
+    --secondary-foreground: 40 25% 91%;
+    --muted: 220 18% 18%;
+    --muted-foreground: 40 10% 65%;
+    --accent: 220 18% 22%;
+    --accent-foreground: 40 25% 91%;
+
+    --destructive: 6 60% 52%;
+    --destructive-foreground: 40 25% 96%;
+
+    --border: 220 16% 24%;
+    --input: 220 16% 28%;
+    --ring: 214 60% 66%;
+
+    --rule: 220 15% 22%;
+    --rule-strong: 220 14% 34%;
+    --spine: 220 14% 28%;
   }
 
   * {
@@ -50,7 +80,12 @@
 
   body {
     @apply bg-background text-foreground antialiased;
-    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+    font-family: var(--font-golos), ui-sans-serif, system-ui, sans-serif;
+  }
+
+  /* Цифры оценок и средних баллов всегда выстраиваются в столбик */
+  .tabular-nums {
+    font-variant-numeric: tabular-nums;
   }
 
   /* Аккуратные скроллбары в таблице журнала */
@@ -59,7 +94,8 @@
     width: 10px;
   }
   .journal-scroll::-webkit-scrollbar-thumb {
-    @apply rounded-full bg-slate-300 dark:bg-slate-600;
+    @apply rounded-full;
+    background-color: hsl(var(--rule-strong));
   }
   .journal-scroll::-webkit-scrollbar-track {
     @apply bg-transparent;
@@ -69,5 +105,31 @@
 @layer components {
   .focus-ring {
     @apply focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background;
+  }
+
+  /**
+   * Разворот журнала: тёплая бумага с едва заметной горизонтальной линовкой.
+   * Текстура берётся из предмета — это разлинованный лист, а не декор.
+   */
+  .ledger-paper {
+    background-color: hsl(var(--card));
+    background-image: repeating-linear-gradient(
+      to bottom,
+      transparent 0,
+      transparent calc(2.25rem - 1px),
+      hsl(var(--rule) / 0.55) calc(2.25rem - 1px),
+      hsl(var(--rule) / 0.55) 2.25rem
+    );
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }

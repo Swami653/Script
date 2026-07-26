@@ -113,6 +113,33 @@ export function guessCurrentQuarter(date = new Date()): Quarter {
   return 4;
 }
 
+/**
+ * Четверть, которую показываем «по умолчанию»: текущая по календарю, но если
+ * в ней ещё нет оценок — последняя заполненная. Иначе в каникулы ученик видит
+ * на самом видном месте прочерк.
+ */
+export function displayQuarter(
+  quarterAverages: readonly (number | null)[],
+  today = new Date(),
+): Quarter {
+  const guess = guessCurrentQuarter(today);
+  if (quarterAverages[guess - 1] !== null && quarterAverages[guess - 1] !== undefined) {
+    return guess;
+  }
+  for (let quarter = 4; quarter >= 1; quarter -= 1) {
+    if (quarterAverages[quarter - 1] !== null && quarterAverages[quarter - 1] !== undefined) {
+      return quarter as Quarter;
+    }
+  }
+  return guess;
+}
+
+/** Учебный год по дате: сентябрь начинает новый год. */
+export function academicYearLabel(date = new Date()): string {
+  const start = date.getMonth() + 1 >= 9 ? date.getFullYear() : date.getFullYear() - 1;
+  return `${start}/${start + 1}`;
+}
+
 export const QUARTER_LABELS: Record<Quarter, string> = {
   1: "1 четверть",
   2: "2 четверть",

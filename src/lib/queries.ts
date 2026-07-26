@@ -235,11 +235,15 @@ export async function getStudentReport(
   };
 }
 
-/** Последние оценки ученика — лента «что нового» в дневнике. */
+/**
+ * Последние оценки ученика — лента «что нового» в дневнике.
+ * Сортировка по ДАТЕ УРОКА, а не по времени создания записи: иначе порядок
+ * зависит от того, в каком порядке учитель заполнял журнал.
+ */
 export async function getRecentGrades(studentId: string, take = 12) {
   return prisma.grade.findMany({
     where: { studentId },
-    orderBy: [{ createdAt: "desc" }],
+    orderBy: [{ lesson: { date: "desc" } }, { createdAt: "desc" }],
     take,
     select: {
       id: true,

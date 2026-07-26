@@ -13,7 +13,7 @@ export default async function ProfilePage() {
 
   return (
     <div className="mx-auto max-w-xl space-y-5">
-      <header className="flex items-center gap-4 rounded-xl border border-border bg-card p-5 shadow-sm">
+      <header className="flex items-center gap-4 rounded-lg border border-rule-strong bg-card p-5">
         <span className="flex h-14 w-14 items-center justify-center rounded-full bg-primary/10 text-lg font-bold text-primary">
           {initials(user.name)}
         </span>

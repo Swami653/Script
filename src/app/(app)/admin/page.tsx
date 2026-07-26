@@ -1,4 +1,3 @@
-import { BookOpen, GraduationCap, ListChecks, ShieldCheck, UserCog, Users } from "lucide-react";
 import type { Metadata } from "next";
 
 import { BulkImportStudents } from "@/app/(app)/admin/bulk-import";
@@ -6,8 +5,10 @@ import { CreateUserForm } from "@/app/(app)/admin/create-user-form";
 import { UsersTable } from "@/app/(app)/admin/users-table";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { requirePageRole } from "@/lib/auth-guards";
+import { academicYearLabel } from "@/lib/grades";
 import { getAdminStats, getAllUsers } from "@/lib/queries";
 import { asRole } from "@/lib/roles";
+import { pluralize } from "@/lib/utils";
 
 export const metadata: Metadata = { title: "Панель администратора" };
 
@@ -15,41 +16,40 @@ export default async function AdminPage() {
   const admin = await requirePageRole(["ADMIN"]);
   const [stats, users] = await Promise.all([getAdminStats(), getAllUsers()]);
 
-  const cards = [
-    { icon: Users, label: "Учеников", value: stats.students },
-    { icon: GraduationCap, label: "Учителей", value: stats.teachers },
-    { icon: ShieldCheck, label: "Администраторов", value: stats.admins },
-    { icon: BookOpen, label: "Предметов", value: stats.subjects },
-    { icon: ListChecks, label: "Уроков", value: stats.lessons },
-    { icon: UserCog, label: "Оценок", value: stats.grades },
-  ];
+  const figures = [
+    { value: stats.students, forms: ["ученик", "ученика", "учеников"] as const },
+    { value: stats.teachers, forms: ["учитель", "учителя", "учителей"] as const },
+    { value: stats.admins, forms: ["администратор", "администратора", "администраторов"] as const },
+    { value: stats.subjects, forms: ["предмет", "предмета", "предметов"] as const },
+    { value: stats.lessons, forms: ["урок", "урока", "уроков"] as const },
+    { value: stats.grades, forms: ["оценка", "оценки", "оценок"] as const },
+  ].map((item) => ({
+    value: item.value,
+    label: pluralize(item.value, item.forms[0], item.forms[1], item.forms[2]),
+  }));
 
   return (
     <div className="space-y-6">
       <header>
-        <h1 className="text-2xl font-bold tracking-tight">Панель администратора</h1>
-        <p className="mt-1 text-sm text-muted-foreground">
-          Управление учётными записями, массовый импорт учеников и сброс паролей.
+        <p className="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">
+          {academicYearLabel()} учебный год
         </p>
+        <h1 className="mt-1 text-[1.75rem] font-extrabold leading-tight tracking-tight">
+          Панель администратора
+        </h1>
+        {/* Состав школы одной строкой: цифры справочные, а не шесть равных плиток */}
+        <dl className="mt-2 flex flex-wrap items-baseline gap-x-5 gap-y-1 text-sm text-muted-foreground">
+          {figures.map((figure) => (
+            <div key={figure.label} className="flex items-baseline gap-1.5">
+              <dt className="sr-only">{figure.label}</dt>
+              <dd className="text-base font-bold tabular-nums text-foreground">{figure.value}</dd>
+              <span aria-hidden>{figure.label}</span>
+            </div>
+          ))}
+        </dl>
       </header>
 
-      <section className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
-        {cards.map((card) => (
-          <Card key={card.label}>
-            <CardContent className="flex items-center gap-3 p-4">
-              <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
-                <card.icon className="h-4 w-4" aria-hidden />
-              </span>
-              <span className="leading-tight">
-                <span className="block text-xl font-bold tabular-nums">{card.value}</span>
-                <span className="block text-[11px] text-muted-foreground">{card.label}</span>
-              </span>
-            </CardContent>
-          </Card>
-        ))}
-      </section>
-
-      <section className="grid gap-5 lg:grid-cols-[1.4fr_1fr]">
+      <section className="grid gap-5 lg:grid-cols-[1.35fr_1fr]">
         <Card>
           <CardHeader>
             <CardTitle>Массовый импорт учеников</CardTitle>

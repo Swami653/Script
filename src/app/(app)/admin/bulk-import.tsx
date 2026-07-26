@@ -90,8 +90,8 @@ export function BulkImportStudents() {
         </div>
 
         <div className="flex flex-wrap items-end gap-3">
-          <div className="w-40 space-y-1.5">
-            <Label htmlFor="import-class">Класс (необязательно)</Label>
+          <div className="w-36 space-y-1.5">
+            <Label htmlFor="import-class">Класс</Label>
             <Input
               id="import-class"
               value={className}
@@ -100,6 +100,10 @@ export function BulkImportStudents() {
               maxLength={20}
             />
           </div>
+
+          <FieldHint className="order-last w-full">
+            Класс указывать не обязательно — его можно проставить позже.
+          </FieldHint>
 
           <Button type="submit" loading={pending} disabled={preview.length === 0}>
             <UserPlus className="h-4 w-4" aria-hidden />

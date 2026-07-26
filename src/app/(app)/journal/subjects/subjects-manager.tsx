@@ -94,13 +94,13 @@ export function SubjectsManager({ subjects }: { subjects: Subject[] }) {
       </Card>
 
       {subjects.length === 0 ? (
-        <p className="rounded-xl border border-dashed border-border bg-card p-8 text-center text-sm text-muted-foreground">
+        <p className="rounded-lg border border-dashed border-rule-strong bg-card p-8 text-center text-sm text-muted-foreground">
           Предметов пока нет. Добавьте первый — он сразу появится в журнале.
         </p>
       ) : (
-        <ul className="divide-y divide-border overflow-hidden rounded-xl border border-border bg-card">
+        <ul className="divide-y divide-rule overflow-hidden rounded-lg border border-rule-strong bg-card">
           {subjects.map((subject) => (
-            <li key={subject.id} className="flex items-center gap-3 p-3 hover:bg-accent/40">
+            <li key={subject.id} className="group/row flex items-center gap-3 p-3 hover:bg-primary/[0.04]">
               {editingId === subject.id ? (
                 <>
                   <Input
@@ -145,7 +145,7 @@ export function SubjectsManager({ subjects }: { subjects: Subject[] }) {
                     size="icon"
                     variant="ghost"
                     title="Удалить предмет"
-                    className="text-destructive hover:bg-destructive/10"
+                    className="text-muted-foreground opacity-60 transition-opacity hover:bg-destructive/10 hover:text-destructive focus-visible:opacity-100 group-hover/row:opacity-100"
                     onClick={() => handleDelete(subject)}
                   >
                     <Trash2 className="h-4 w-4" aria-hidden />

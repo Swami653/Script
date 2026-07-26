@@ -1,6 +1,17 @@
 import type { Metadata, Viewport } from "next";
+import { Golos_Text } from "next/font/google";
 
 import "./globals.css";
+
+/**
+ * Один шрифт на весь интерфейс — Golos Text: кириллическая гарнитура,
+ * нарисованная для интерфейсов, с табличными цифрами (важно для сетки оценок).
+ */
+const golos = Golos_Text({
+  subsets: ["cyrillic", "latin"],
+  display: "swap",
+  variable: "--font-golos",
+});
 
 export const metadata: Metadata = {
   title: {
@@ -13,8 +24,8 @@ export const metadata: Metadata = {
 
 export const viewport: Viewport = {
   themeColor: [
-    { media: "(prefers-color-scheme: light)", color: "#f8fafc" },
-    { media: "(prefers-color-scheme: dark)", color: "#0b1220" },
+    { media: "(prefers-color-scheme: light)", color: "#f7f5f0" },
+    { media: "(prefers-color-scheme: dark)", color: "#12161f" },
   ],
 };
 
@@ -33,7 +44,7 @@ const themeScript = `
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="ru" suppressHydrationWarning>
+    <html lang="ru" className={golos.variable} suppressHydrationWarning>
       <head>
         <script dangerouslySetInnerHTML={{ __html: themeScript }} />
       </head>

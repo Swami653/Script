@@ -32,7 +32,7 @@ export default async function StudentCardPage({
         Ко всем ученикам
       </Link>
 
-      <header className="flex flex-wrap items-center gap-4 rounded-xl border border-border bg-card p-5 shadow-sm">
+      <header className="flex flex-wrap items-center gap-4 rounded-lg border border-rule-strong bg-card p-5">
         <span className="flex h-14 w-14 items-center justify-center rounded-full bg-primary/10 text-lg font-bold text-primary">
           {initials(report.student.name)}
         </span>

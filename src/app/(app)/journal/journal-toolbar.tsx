@@ -44,7 +44,7 @@ export function JournalToolbar({
 
   return (
     <div className="space-y-3">
-      <div className="flex flex-wrap items-end gap-3 rounded-xl border border-border bg-card p-3 shadow-sm">
+      <div className="flex flex-wrap items-end gap-3 rounded-lg border border-rule-strong bg-card p-3">
         <div className="min-w-[190px] flex-1 space-y-1.5 sm:max-w-xs">
           <Label htmlFor="subject-select">Предмет</Label>
           <Select
@@ -62,7 +62,7 @@ export function JournalToolbar({
 
         <div className="space-y-1.5">
           <Label>Четверть</Label>
-          <div className="flex rounded-md border border-input bg-card p-0.5">
+          <div className="flex rounded-md border border-input bg-card p-0.5" role="group" aria-label="Четверть">
             {QUARTERS.map((item) => (
               <button
                 key={item}
@@ -135,7 +135,8 @@ export function JournalToolbar({
         />
       )}
 
-      <p className="flex flex-wrap items-center gap-x-3 gap-y-1 px-1 text-xs text-muted-foreground">
+      {/* Подсказка про клавиши бессмысленна там, где нет клавиатуры */}
+      <p className="hidden flex-wrap items-center gap-x-3 gap-y-1 px-1 text-xs text-muted-foreground md:flex">
         <span className="inline-flex items-center gap-1.5 font-medium">
           <Keyboard className="h-3.5 w-3.5" aria-hidden />
           Горячие клавиши:
@@ -185,7 +186,7 @@ function AddLessonForm({
 
   return (
     <form
-      className="animate-fade-in flex flex-wrap items-end gap-3 rounded-xl border border-border bg-muted/40 p-3"
+      className="animate-fade-in flex flex-wrap items-end gap-3 rounded-lg border border-rule-strong bg-secondary/50 p-3"
       onSubmit={(event) => {
         event.preventDefault();
         startTransition(async () => {

@@ -15,7 +15,13 @@ const config: Config = {
       screens: { "2xl": "1400px" },
     },
     extend: {
+      fontFamily: {
+        sans: ["var(--font-golos)", "ui-sans-serif", "system-ui", "sans-serif"],
+      },
       colors: {
+        rule: "hsl(var(--rule))",
+        "rule-strong": "hsl(var(--rule-strong))",
+        spine: "hsl(var(--spine))",
         border: "hsl(var(--border))",
         input: "hsl(var(--input))",
         ring: "hsl(var(--ring))",
@@ -60,10 +66,17 @@ const config: Config = {
           from: { opacity: "0", transform: "scale(0.94)" },
           to: { opacity: "1", transform: "scale(1)" },
         },
+        /* «Чернила легли»: отклик на выставленную оценку — быстрый и уверенный */
+        "ink-settle": {
+          "0%": { transform: "scale(0.86)", opacity: "0.4" },
+          "60%": { transform: "scale(1.06)" },
+          "100%": { transform: "scale(1)", opacity: "1" },
+        },
       },
       animation: {
         "fade-in": "fade-in 0.18s ease-out",
         "pop-in": "pop-in 0.12s ease-out",
+        "ink-settle": "ink-settle 0.22s cubic-bezier(0.2, 0.8, 0.2, 1)",
       },
     },
   },

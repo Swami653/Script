@@ -40,18 +40,18 @@ export function StudentsList({ students }: { students: Student[] }) {
       </div>
 
       {filtered.length === 0 ? (
-        <p className="rounded-xl border border-dashed border-border bg-card p-8 text-center text-sm text-muted-foreground">
+        <p className="rounded-lg border border-dashed border-rule-strong bg-card p-8 text-center text-sm text-muted-foreground">
           {students.length === 0
             ? "Учеников пока нет — добавьте их в панели администратора."
             : "Никого не найдено."}
         </p>
       ) : (
-        <ul className="divide-y divide-border overflow-hidden rounded-xl border border-border bg-card">
+        <ul className="divide-y divide-rule overflow-hidden rounded-lg border border-rule-strong bg-card">
           {filtered.map((student) => (
             <li key={student.id}>
               <Link
                 href={`/journal/students/${student.id}`}
-                className="focus-ring flex items-center gap-3 p-3 transition-colors hover:bg-accent/50"
+                className="focus-ring flex items-center gap-3 p-3 transition-colors hover:bg-primary/[0.05]"
               >
                 <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-primary/10 text-xs font-bold text-primary">
                   {initials(student.name)}

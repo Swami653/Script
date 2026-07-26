@@ -36,25 +36,35 @@ export type GridRow = {
   quarterAverages: (number | null)[];
 };
 
-type CellKey = `${string}|${string}`;
-
 const GRADE_BUTTONS = Array.from({ length: MAX_GRADE }, (_, index) => index + MIN_GRADE);
 
-function cellKey(studentId: string, lessonId: string): CellKey {
+function cellKey(studentId: string, lessonId: string): string {
   return `${studentId}|${lessonId}`;
 }
 
+/** «Иванова Мария Петровна» -> «Иванова М. П.» — для узких экранов. */
+function shortName(name: string): string {
+  const [surname, ...rest] = name.trim().split(/\s+/);
+  if (!surname) return name;
+  const initials = rest
+    .slice(0, 2)
+    .map((part) => `${part[0]!.toUpperCase()}.`)
+    .join(" ");
+  return initials ? `${surname} ${initials}` : surname;
+}
+
 /**
- * Журнал: строки — ученики, столбцы — уроки.
+ * Журнал класса. Разворот ведомости: строки — ученики, столбцы — уроки,
+ * справа за двойной линейкой — итоги (средний за четверть и годовая).
  *
- * Управление с клавиатуры:
+ * Клавиатура:
  *   ← → ↑ ↓  — перемещение по ячейкам
- *   1…9      — выставить оценку, 0 — выставить 10 (или наберите «10»)
+ *   1…9      — выставить оценку, 0 — выставить 10 (наберите «10» — тоже работает)
  *   Enter    — открыть выбор оценки мышью
  *   Delete / Backspace — удалить оценку
  *
- * Значение в ячейке обновляется оптимистично; при ошибке сервера
- * (например, 403 для ученика) изменение откатывается и показывается уведомление.
+ * Оценка применяется оптимистично; при отказе сервера (например, 403 для
+ * ученика) значение откатывается и показывается уведомление.
  */
 export function JournalGrid({
   lessons,
@@ -71,12 +81,13 @@ export function JournalGrid({
   const { flash, show, clear } = useFlash();
   const [, startTransition] = useTransition();
 
-  /** Оптимистичные значения поверх серверных данных. */
   const [overrides, setOverrides] = useState<Record<string, number | null>>({});
   const [selected, setSelected] = useState<{ row: number; col: number } | null>(null);
   const [picker, setPicker] = useState<{ row: number; col: number; x: number; y: number } | null>(
     null,
   );
+  /** Ячейки, куда оценка «легла» только что — для короткой анимации. */
+  const [settled, setSettled] = useState<Record<string, number>>({});
   const pendingOne = useRef<ReturnType<typeof setTimeout> | null>(null);
   const gridRef = useRef<HTMLDivElement>(null);
 
@@ -99,7 +110,6 @@ export function JournalGrid({
     [lessons, overrides, rows],
   );
 
-  /** Средний балл строки за выбранную четверть с учётом несохранённых изменений. */
   const rowStats = useMemo(
     () =>
       rows.map((row, rowIndex) => {
@@ -123,10 +133,13 @@ export function JournalGrid({
   );
 
   const focusCell = useCallback((rowIndex: number, colIndex: number) => {
-    const node = gridRef.current?.querySelector<HTMLButtonElement>(
-      `[data-cell="${rowIndex}-${colIndex}"]`,
-    );
-    node?.focus();
+    gridRef.current
+      ?.querySelector<HTMLButtonElement>(`[data-cell="${rowIndex}-${colIndex}"]`)
+      ?.focus();
+  }, []);
+
+  const markSettled = useCallback((key: string) => {
+    setSettled((prev) => ({ ...prev, [key]: (prev[key] ?? 0) + 1 }));
   }, []);
 
   const commitGrade = useCallback(
@@ -138,6 +151,7 @@ export function JournalGrid({
       const key = cellKey(row.studentId, lesson.id);
       const previous = row.cells[lesson.id]?.value ?? null;
       setOverrides((prev) => ({ ...prev, [key]: value }));
+      markSettled(key);
 
       startTransition(async () => {
         const result = await setGradeAction({
@@ -154,7 +168,7 @@ export function JournalGrid({
         router.refresh();
       });
     },
-    [lessons, router, rows, show],
+    [lessons, markSettled, router, rows, show],
   );
 
   const removeGrade = useCallback(
@@ -185,7 +199,7 @@ export function JournalGrid({
     [lessons, overrides, router, rows, show],
   );
 
-  /** Переход к следующему ученику — как в Excel, чтобы быстро заполнять столбец. */
+  /** Как в ведомости: выставил — курсор ушёл к следующему ученику. */
   const advanceDown = useCallback(
     (rowIndex: number, colIndex: number) => {
       const next = Math.min(rowIndex + 1, rows.length - 1);
@@ -275,71 +289,78 @@ export function JournalGrid({
 
   if (lessons.length === 0) {
     return (
-      <div className="rounded-xl border border-dashed border-border bg-card p-10 text-center">
-        <p className="text-sm font-medium">В этой четверти ещё нет уроков</p>
-        <p className="mt-1 text-sm text-muted-foreground">
-          Добавьте урок кнопкой «Добавить урок» — он станет новым столбцом журнала.
-        </p>
-      </div>
+      <EmptyBoard
+        title="В этой четверти ещё нет уроков"
+        hint="Урок — это столбец журнала. Нажмите «Добавить урок», укажите дату и тему — и можно выставлять оценки."
+      />
     );
   }
 
   if (rows.length === 0) {
     return (
-      <div className="rounded-xl border border-dashed border-border bg-card p-10 text-center">
-        <Users className="mx-auto mb-2 h-6 w-6 text-muted-foreground" aria-hidden />
-        <p className="text-sm font-medium">Нет учеников</p>
-        <p className="mt-1 text-sm text-muted-foreground">
-          Добавьте учеников в панели администратора — там есть массовый импорт списком.
-        </p>
-      </div>
+      <EmptyBoard
+        icon={Users}
+        title="В журнале нет учеников"
+        hint="Ученики заводятся в панели администратора. Там есть массовый импорт: вставьте список ФИО — логины и пароли создадутся сами."
+      />
     );
   }
 
   return (
     <>
+      {/* ── Разворот ведомости: с планшета и шире ─────────────────────────── */}
       <div
         ref={gridRef}
-        className="journal-scroll overflow-x-auto rounded-xl border border-border bg-card shadow-sm"
+        className="journal-scroll hidden overflow-x-auto rounded-lg border border-rule-strong shadow-sm md:block"
       >
-        <table className="w-full border-collapse text-sm">
+        <table className="ledger-paper w-auto min-w-full border-collapse text-sm">
           <thead>
-            <tr className="bg-muted/60">
+            <tr>
               <th
                 scope="col"
-                className="sticky left-0 z-20 min-w-[220px] border-b border-r border-border bg-muted/95 px-3 py-2 text-left font-semibold backdrop-blur"
+                className="sticky left-0 z-20 w-[17rem] min-w-[17rem] border-b-2 border-r border-rule-strong bg-card px-3 py-2 text-left align-bottom text-xs font-semibold uppercase tracking-wide text-muted-foreground"
               >
                 Ученик
               </th>
-              {lessons.map((lesson) => (
+              {lessons.map((lesson, index) => (
                 <th
                   key={lesson.id}
                   scope="col"
-                  className="group border-b border-border px-1 py-2 text-center font-medium"
+                  className={cn(
+                    "group w-[3.25rem] border-b-2 border-rule-strong px-0 py-1.5 align-bottom font-medium",
+                    // Смена месяца — единственная вертикальная линия внутри сетки:
+                    // она несёт смысл, а не украшает.
+                    index > 0 &&
+                      new Date(lesson.date).getUTCMonth() !==
+                        new Date(lessons[index - 1]!.date).getUTCMonth() &&
+                      "border-l border-l-rule-strong",
+                  )}
                   title={`${formatDateLong(lesson.date)}${lesson.topic ? ` — ${lesson.topic}` : ""}`}
                 >
-                  <div className="flex min-w-[46px] flex-col items-center gap-0.5">
-                    <span className="tabular-nums">{formatDateShort(lesson.date)}</span>
-                    {lesson.topic && (
-                      <span className="max-w-[70px] truncate text-[10px] font-normal text-muted-foreground">
-                        {lesson.topic}
-                      </span>
-                    )}
+                  {/* Только дата: обрезанная до «Сочине…» тема ничего не сообщает.
+                      Полная тема — в подсказке и в мобильном выборе урока. */}
+                  <div className="flex flex-col items-center gap-0.5">
+                    <span className="text-[13px] tabular-nums">{formatDateShort(lesson.date)}</span>
                     {canEdit && <DeleteLessonButton lessonId={lesson.id} onError={show} />}
                   </div>
                 </th>
               ))}
+              {/* Незаполненная часть разворота: забирает лишнюю ширину,
+                  чтобы столбцы уроков стояли плотно, а не расползались */}
+              <th scope="col" aria-hidden className="w-auto border-b-2 border-rule-strong" />
+
+              {/* Двойная линейка отделяет итоги — как в бумажной ведомости */}
               <th
                 scope="col"
-                className="border-b border-l border-border bg-muted/60 px-3 py-2 text-center font-semibold"
+                className="w-24 border-b-2 border-l border-rule-strong bg-secondary/40 px-3 py-2 text-center align-bottom text-xs font-semibold uppercase tracking-wide text-muted-foreground"
                 title="Средний балл за выбранную четверть"
               >
                 Средний
               </th>
               <th
                 scope="col"
-                className="border-b border-border bg-muted/60 px-3 py-2 text-center font-semibold"
-                title="Годовая оценка по предмету (округление среднего по четвертям)"
+                className="w-16 border-b-2 border-rule-strong bg-secondary/40 px-2 py-2 text-center align-bottom text-xs font-semibold uppercase tracking-wide text-muted-foreground"
+                title="Годовая оценка: среднее по четвертям, округлённое до целого"
               >
                 Год
               </th>
@@ -348,43 +369,47 @@ export function JournalGrid({
 
           <tbody>
             {rows.map((row, rowIndex) => (
-              <tr key={row.studentId} className="group/row even:bg-muted/20">
+              <tr key={row.studentId} className="group/row hover:bg-primary/[0.04]">
                 <th
                   scope="row"
-                  className="sticky left-0 z-10 border-b border-r border-border bg-card px-3 py-1.5 text-left font-normal group-hover/row:bg-accent/40"
+                  className="sticky left-0 z-10 border-b border-r border-rule bg-card px-3 py-0 text-left font-normal shadow-[inset_3px_0_0_hsl(var(--spine))] group-hover/row:bg-accent/50"
                 >
                   <Link
                     href={`/journal/students/${row.studentId}`}
-                    className="focus-ring flex items-center justify-between gap-2 rounded"
+                    className="focus-ring flex h-9 items-center justify-between gap-2 rounded"
                     title="Открыть карточку ученика — оценки по всем предметам"
                   >
                     <span className="truncate">{row.name}</span>
-                    <span className="flex items-center gap-1.5">
-                      {row.className && (
-                        <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
-                          {row.className}
-                        </span>
-                      )}
-                      <ExternalLink
-                        className="h-3.5 w-3.5 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover/row:opacity-100"
-                        aria-hidden
-                      />
-                    </span>
+                    <ExternalLink
+                      className="h-3.5 w-3.5 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover/row:opacity-100"
+                      aria-hidden
+                    />
                   </Link>
                 </th>
 
                 {lessons.map((lesson, colIndex) => {
                   const value = valueAt(rowIndex, colIndex);
                   const isSelected = selected?.row === rowIndex && selected?.col === colIndex;
-                  const isFocusable =
-                    activeCell.row === rowIndex && activeCell.col === colIndex ? 0 : -1;
+                  const key = cellKey(row.studentId, lesson.id);
+                  const monthBreak =
+                    colIndex > 0 &&
+                    new Date(lesson.date).getUTCMonth() !==
+                      new Date(lessons[colIndex - 1]!.date).getUTCMonth();
 
                   return (
-                    <td key={lesson.id} className="border-b border-border p-0.5 text-center">
+                    <td
+                      key={lesson.id}
+                      className={cn(
+                        "border-b border-rule p-0 text-center",
+                        monthBreak && "border-l border-l-rule-strong",
+                      )}
+                    >
                       <button
                         type="button"
                         data-cell={`${rowIndex}-${colIndex}`}
-                        tabIndex={isFocusable}
+                        tabIndex={
+                          activeCell.row === rowIndex && activeCell.col === colIndex ? 0 : -1
+                        }
                         onClick={(event) => openPicker(event, rowIndex, colIndex)}
                         onFocus={() => setSelected({ row: rowIndex, col: colIndex })}
                         onKeyDown={(event) => handleKeyDown(event, rowIndex, colIndex)}
@@ -392,34 +417,45 @@ export function JournalGrid({
                           value ?? "не выставлена"
                         }`}
                         className={cn(
-                          "mx-auto flex h-8 w-11 items-center justify-center rounded-md text-sm font-semibold tabular-nums transition-all focus:outline-none",
+                          "mx-auto flex h-9 w-full items-center justify-center text-[15px] font-semibold tabular-nums transition-colors focus:outline-none",
                           value === null
-                            ? "text-transparent hover:bg-accent hover:text-muted-foreground"
-                            : gradeColorClasses(value),
-                          isSelected && "ring-2 ring-primary ring-offset-1 ring-offset-card",
+                            ? "text-transparent hover:bg-primary/10"
+                            : "hover:brightness-[0.97]",
+                          isSelected && "ring-2 ring-inset ring-primary",
                           canEdit ? "cursor-pointer" : "cursor-default",
                         )}
                       >
-                        {value ?? "·"}
+                        <span
+                          key={settled[key] ?? 0}
+                          className={cn(
+                            "flex h-7 w-9 items-center justify-center rounded",
+                            value !== null && gradeColorClasses(value),
+                            value !== null && settled[key] && "animate-ink-settle",
+                          )}
+                        >
+                          {value ?? "·"}
+                        </span>
                       </button>
                     </td>
                   );
                 })}
 
-                <td className="border-b border-l border-border bg-muted/30 px-3 py-1.5 text-center">
+                <td className="border-b border-rule" />
+
+                <td className="border-b border-l border-rule-strong bg-secondary/30 px-3 py-1 text-center">
                   <span
                     className={cn(
-                      "font-semibold tabular-nums",
+                      "text-[15px] font-semibold tabular-nums",
                       averageColorClasses(rowStats[rowIndex]?.average ?? null),
                     )}
                   >
                     {formatAverage(rowStats[rowIndex]?.average ?? null)}
                   </span>
                 </td>
-                <td className="border-b border-border bg-muted/30 px-3 py-1.5 text-center">
+                <td className="border-b border-rule bg-secondary/30 px-2 py-1 text-center">
                   <span
                     className={cn(
-                      "inline-flex h-7 w-9 items-center justify-center rounded-md text-sm font-bold tabular-nums",
+                      "inline-flex h-7 w-9 items-center justify-center rounded text-[15px] font-bold tabular-nums",
                       gradeColorClasses(rowStats[rowIndex]?.year ?? null),
                     )}
                   >
@@ -431,10 +467,10 @@ export function JournalGrid({
           </tbody>
 
           <tfoot>
-            <tr className="bg-muted/50 text-xs">
+            <tr className="bg-secondary/50 text-xs">
               <th
                 scope="row"
-                className="sticky left-0 z-10 border-r border-border bg-muted/95 px-3 py-2 text-left font-medium"
+                className="sticky left-0 z-10 border-r border-t-2 border-rule-strong bg-secondary px-3 py-2 text-left font-medium text-muted-foreground"
               >
                 Средний балл класса
               </th>
@@ -443,23 +479,38 @@ export function JournalGrid({
                   .map((_, rowIndex) => valueAt(rowIndex, colIndex))
                   .filter((value): value is number => value !== null);
                 return (
-                  <td key={lesson.id} className="px-1 py-2 text-center tabular-nums">
+                  <td
+                    key={lesson.id}
+                    className="border-t-2 border-rule-strong px-0 py-2 text-center tabular-nums"
+                  >
                     <span className={averageColorClasses(averageGrade(values))}>
                       {formatAverage(averageGrade(values))}
                     </span>
                   </td>
                 );
               })}
-              <td className="border-l border-border px-3 py-2 text-center font-semibold tabular-nums">
+              <td className="border-t-2 border-rule-strong" />
+              <td className="border-l border-t-2 border-rule-strong px-3 py-2 text-center font-semibold tabular-nums">
                 <span className={averageColorClasses(classAverage)}>
                   {formatAverage(classAverage)}
                 </span>
               </td>
-              <td className="px-3 py-2" />
+              <td className="border-t-2 border-rule-strong px-2 py-2" />
             </tr>
           </tfoot>
         </table>
       </div>
+
+      {/* ── Телефон: «урок за раз» ────────────────────────────────────────── */}
+      <MobileLessonBoard
+        lessons={lessons}
+        rows={rows}
+        canEdit={canEdit}
+        valueAt={valueAt}
+        rowStats={rowStats}
+        onPick={(rowIndex, colIndex, value) => commitGrade(rowIndex, colIndex, value)}
+        onRemove={(rowIndex, colIndex) => removeGrade(rowIndex, colIndex)}
+      />
 
       {picker && canEdit && (
         <GradePicker
@@ -482,6 +533,157 @@ export function JournalGrid({
 
       <Flash message={flash} onClose={clear} />
     </>
+  );
+}
+
+/**
+ * Мобильный режим: сначала выбираем урок, потом идём по списку учеников.
+ * Таблица на 390px нечитаема, а этот экран позволяет реально вести журнал с телефона.
+ */
+function MobileLessonBoard({
+  lessons,
+  rows,
+  canEdit,
+  valueAt,
+  rowStats,
+  onPick,
+  onRemove,
+}: {
+  lessons: GridLesson[];
+  rows: GridRow[];
+  canEdit: boolean;
+  valueAt: (row: number, col: number) => number | null;
+  rowStats: { average: number | null; year: number | null }[];
+  onPick: (row: number, col: number, value: number) => void;
+  onRemove: (row: number, col: number) => void;
+}) {
+  const [colIndex, setColIndex] = useState(() => Math.max(0, lessons.length - 1));
+  const [openRow, setOpenRow] = useState<number | null>(null);
+
+  const lesson = lessons[Math.min(colIndex, lessons.length - 1)];
+  if (!lesson) return null;
+
+  return (
+    <div className="space-y-3 md:hidden">
+      <div className="rounded-lg border border-rule-strong bg-card p-3">
+        <label
+          htmlFor="mobile-lesson"
+          className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-muted-foreground"
+        >
+          Урок
+        </label>
+        <select
+          id="mobile-lesson"
+          value={colIndex}
+          onChange={(event) => {
+            setColIndex(Number(event.target.value));
+            setOpenRow(null);
+          }}
+          className="focus-ring h-11 w-full rounded-md border border-input bg-card px-3 text-sm text-foreground"
+        >
+          {lessons.map((item, index) => (
+            <option key={item.id} value={index}>
+              {formatDateShort(item.date)}
+              {item.topic ? ` · ${item.topic}` : ""}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      <ul className="divide-y divide-rule overflow-hidden rounded-lg border border-rule-strong bg-card">
+        {rows.map((row, rowIndex) => {
+          const value = valueAt(rowIndex, colIndex);
+          const isOpen = openRow === rowIndex;
+
+          return (
+            <li key={row.studentId}>
+              <div className="flex items-center gap-2 p-2.5">
+                <Link
+                  href={`/journal/students/${row.studentId}`}
+                  className="focus-ring min-w-0 flex-1 rounded"
+                >
+                  <span className="block truncate text-sm font-medium">{shortName(row.name)}</span>
+                  <span className="block text-[11px] text-muted-foreground">
+                    средний за четверть: {formatAverage(rowStats[rowIndex]?.average ?? null)}
+                  </span>
+                </Link>
+
+                <button
+                  type="button"
+                  onClick={() => canEdit && setOpenRow(isOpen ? null : rowIndex)}
+                  disabled={!canEdit}
+                  aria-expanded={isOpen}
+                  aria-label={`Оценка ученика ${row.name}: ${value ?? "не выставлена"}`}
+                  className={cn(
+                    "flex h-11 w-14 shrink-0 items-center justify-center rounded-md text-base font-bold tabular-nums transition-transform active:scale-95",
+                    value === null
+                      ? "border border-dashed border-input text-muted-foreground"
+                      : gradeColorClasses(value),
+                    isOpen && "ring-2 ring-primary",
+                  )}
+                >
+                  {value ?? "—"}
+                </button>
+              </div>
+
+              {isOpen && canEdit && (
+                <div className="animate-fade-in border-t border-rule bg-secondary/40 p-2.5">
+                  <div className="grid grid-cols-5 gap-1.5">
+                    {GRADE_BUTTONS.map((grade) => (
+                      <button
+                        key={grade}
+                        type="button"
+                        onClick={() => {
+                          onPick(rowIndex, colIndex, grade);
+                          setOpenRow(null);
+                        }}
+                        className={cn(
+                          "focus-ring h-11 rounded-md text-base font-bold tabular-nums",
+                          gradeColorClasses(grade),
+                          value === grade && "ring-2 ring-primary",
+                        )}
+                      >
+                        {grade}
+                      </button>
+                    ))}
+                  </div>
+                  <button
+                    type="button"
+                    disabled={value === null}
+                    onClick={() => {
+                      onRemove(rowIndex, colIndex);
+                      setOpenRow(null);
+                    }}
+                    className="focus-ring mt-2 flex h-10 w-full items-center justify-center gap-1.5 rounded-md text-sm text-muted-foreground disabled:opacity-40"
+                  >
+                    <Eraser className="h-4 w-4" aria-hidden />
+                    Удалить оценку
+                  </button>
+                </div>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
+
+function EmptyBoard({
+  title,
+  hint,
+  icon: Icon,
+}: {
+  title: string;
+  hint: string;
+  icon?: React.ElementType;
+}) {
+  return (
+    <div className="ledger-paper rounded-lg border border-rule-strong p-10 text-center">
+      {Icon && <Icon className="mx-auto mb-3 h-6 w-6 text-muted-foreground" aria-hidden />}
+      <p className="text-base font-semibold">{title}</p>
+      <p className="mx-auto mt-1.5 max-w-md text-sm text-muted-foreground">{hint}</p>
+    </div>
   );
 }
 
@@ -534,7 +736,7 @@ function GradePicker({
       ref={ref}
       role="dialog"
       aria-label="Выбор оценки"
-      className="animate-pop-in fixed z-50 -translate-x-1/2 rounded-xl border border-border bg-card p-2 shadow-xl"
+      className="animate-pop-in fixed z-50 -translate-x-1/2 rounded-lg border border-rule-strong bg-card p-2 shadow-lg"
       style={{ left, top }}
     >
       <div className="grid grid-cols-5 gap-1">
@@ -544,9 +746,9 @@ function GradePicker({
             type="button"
             onClick={() => onPick(value)}
             className={cn(
-              "focus-ring h-9 w-9 rounded-md text-sm font-bold tabular-nums transition-transform hover:scale-110",
+              "focus-ring h-9 w-9 rounded text-sm font-bold tabular-nums transition-transform hover:scale-110",
               gradeColorClasses(value),
-              current === value && "ring-2 ring-primary ring-offset-1 ring-offset-card",
+              current === value && "ring-2 ring-primary",
             )}
           >
             {value}
@@ -557,7 +759,7 @@ function GradePicker({
         type="button"
         onClick={onRemove}
         disabled={current === null}
-        className="focus-ring mt-1.5 flex w-full items-center justify-center gap-1.5 rounded-md px-2 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted-foreground"
+        className="focus-ring mt-1.5 flex w-full items-center justify-center gap-1.5 rounded px-2 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted-foreground"
       >
         <Eraser className="h-3.5 w-3.5" aria-hidden />
         Удалить оценку
@@ -581,7 +783,7 @@ function DeleteLessonButton({
     <Button
       variant="ghost"
       size="icon"
-      className="h-5 w-5 opacity-0 transition-opacity group-hover:opacity-100"
+      className="h-4 w-4 opacity-0 transition-opacity focus-visible:opacity-100 group-hover:opacity-100"
       title="Удалить урок вместе с оценками"
       loading={pending}
       onClick={() => {

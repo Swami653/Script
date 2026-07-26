@@ -152,7 +152,7 @@ export function UsersTable({
       <CardContent className="p-0">
         <div className="journal-scroll overflow-x-auto">
           <table className="w-full text-sm">
-            <thead className="bg-muted/60 text-xs uppercase tracking-wide text-muted-foreground">
+            <thead className="bg-secondary/60 text-[11px] uppercase tracking-wide text-muted-foreground">
               <tr>
                 <th className="px-4 py-2.5 text-left font-semibold">Пользователь</th>
                 <th className="px-3 py-2.5 text-left font-semibold">Роль</th>
@@ -163,7 +163,7 @@ export function UsersTable({
             </thead>
             <tbody className="divide-y divide-border">
               {filtered.map((user) => (
-                <tr key={user.id} className="hover:bg-accent/30">
+                <tr key={user.id} className="group/row hover:bg-primary/[0.04]">
                   <td className="px-4 py-2">
                     <div className="flex items-center gap-2">
                       <div className="min-w-0">
@@ -218,7 +218,7 @@ export function UsersTable({
                         size="icon"
                         variant="ghost"
                         title="Удалить пользователя"
-                        className="text-destructive hover:bg-destructive/10"
+                        className="text-muted-foreground opacity-60 transition-opacity hover:bg-destructive/10 hover:text-destructive focus-visible:opacity-100 group-hover/row:opacity-100"
                         onClick={() => handleDelete(user)}
                         disabled={pending || user.id === currentUserId}
                       >

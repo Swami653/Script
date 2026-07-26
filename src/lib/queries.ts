@@ -72,6 +72,15 @@ export type JournalLesson = {
   homework: string | null;
   /** Пометка планируемой работы — сырой TEXT из БД; UI приводит через isGradeKind. */
   plannedKind: string | null;
+  /**
+   * «Не разобрался в теме»: сколько учеников ТЕКУЩЕЙ выборки (с учётом фильтра
+   * класса) просят объяснить ещё раз и кто именно — в порядке строк журнала.
+   * Данные видит только учитель/администратор: getJournalData вызывается
+   * исключительно из-под requirePageRole/requireRole(GRADE_EDITOR_ROLES), а на
+   * страницы /family и /student этот запрос не импортируется (family-guards).
+   */
+  confusedCount: number;
+  confusedNames: string[];
 };
 
 /** Штамп «Ознакомлен» на оценке — снимок для попапа клетки журнала. */
@@ -206,6 +215,7 @@ export async function getJournalData(
     debtsOfQuarter,
     masteryOfQuarter,
     stampsOfYear,
+    confusionsOfQuarter,
   ] = await Promise.all([
     prisma.lesson.findMany({
       where: { subjectId, quarter, year, ...LIVE_LESSON },
@@ -259,6 +269,12 @@ export async function getJournalData(
       where: { subjectId, year, lesson: LIVE_LESSON },
       orderBy: { createdAt: "asc" },
       select: { kind: true, quarter: true, studentId: true, lessonId: true },
+    }),
+    // «Не разобрался в теме» — счётчик шапки столбца и список имён панели
+    // урока. Данные учительские (см. комментарий у JournalLesson).
+    prisma.topicConfusion.findMany({
+      where: { subjectId, quarter, year, lesson: LIVE_LESSON },
+      select: { studentId: true, lessonId: true },
     }),
   ]);
 
@@ -393,8 +409,26 @@ export async function getJournalData(
     .map((row) => row.average)
     .filter((value): value is number => value !== null);
 
+  // «Не разобрался в теме»: кто из учеников просит объяснить урок ещё раз.
+  // Имена собираются проходом по students — список повторяет порядок строк
+  // журнала и отбрасывает отметивших вне текущего фильтра класса: кого нет в
+  // сетке, того нет и в счётчике, иначе «2 из 15» не сходилось бы со списком.
+  const confusedByLesson = new Map<string, Set<string>>();
+  for (const mark of confusionsOfQuarter) {
+    const set = confusedByLesson.get(mark.lessonId) ?? new Set<string>();
+    set.add(mark.studentId);
+    confusedByLesson.set(mark.lessonId, set);
+  }
+  const lessonsWithConfusion: JournalLesson[] = lessons.map((lesson) => {
+    const confusedIds = confusedByLesson.get(lesson.id);
+    const confusedNames = confusedIds
+      ? students.filter((student) => confusedIds.has(student.id)).map((student) => student.name)
+      : [];
+    return { ...lesson, confusedCount: confusedNames.length, confusedNames };
+  });
+
   return {
-    lessons,
+    lessons: lessonsWithConfusion,
     rows,
     classAverage: averageGrade(classAverages),
   };
@@ -636,6 +670,12 @@ export type SubjectLessonRow = {
   /** Печати клетки; null в массиве — неизвестный вид (рисуется как «Печать»). */
   stamps: (StampKind | null)[];
   absent: boolean;
+  /**
+   * Ученик отметил «не разобрался в теме». Для зрителя-родителя ВСЕГДА false —
+   * отметки ему не отдаются вовсе (см. решение приватности в
+   * getStudentSubjectDetail).
+   */
+  confused: boolean;
 };
 
 export type StudentSubjectDetail = {
@@ -727,6 +767,30 @@ export async function getStudentSubjectDetail(
     }),
   ]);
 
+  /*
+   * ПРИВАТНОСТЬ отметки «не разобрался в теме» — зафиксированное решение фичи:
+   *
+   *  - одноклассники не видят НИЧЕГО (ни счётчика, ни факта): ученик через
+   *    requireOwnChild получает только СВОЮ страницу, а в его данных чужих
+   *    отметок нет по построению запроса (фильтр studentId);
+   *  - учитель и администратор видят отметку и здесь (карточка ученика), и в
+   *    журнале поимённо — иначе не подойти к конкретному ребёнку;
+   *  - РОДИТЕЛЬ НЕ ВИДИТ ОТМЕТКИ СВОЕГО РЕБЁНКА ВОВСЕ. Это осознанный выбор,
+   *    а не пропуск: «не понял» — канал доверия между ребёнком и учителем.
+   *    Если просьба объяснить оборачивается домашним разбором, ребёнок просто
+   *    перестаёт нажимать — и канал умирает. Поэтому родительскому зрителю
+   *    строки не запрашиваются в принципе: чего нет в выборке, то не утечёт
+   *    ни в рендер, ни в будущие уведомления.
+   */
+  const confusionRows =
+    viewer.role === "PARENT"
+      ? []
+      : await prisma.topicConfusion.findMany({
+          where: { studentId, subjectId, year, lesson: LIVE_LESSON },
+          select: { lessonId: true },
+        });
+  const confusedLessons = new Set(confusionRows.map((row) => row.lessonId));
+
   // Штампы «Ознакомлен» ЭТОГО родителя — для кнопок и пометки «изменена после
   // просмотра» в родительском разборе. Другим ролям — false/false; чужие
   // подписи в этот запрос не попадают вовсе.
@@ -799,6 +863,7 @@ export async function getStudentSubjectDetail(
       mastery,
       stamps,
       absent,
+      confused: confusedLessons.has(lesson.id),
     };
     // Будущий урок без содержимого клетки — в «Впереди», а не в ленту четверти.
     if (lesson.date <= todayUtc || cell.length > 0 || absent || mastery || stamps.length > 0) {

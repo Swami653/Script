@@ -26,6 +26,7 @@ const LESSON_FOR_GRADE = {
   quarter: true,
   year: true,
   date: true,
+  topic: true,
   deletedAt: true,
   subject: { select: { name: true } },
 } as const;
@@ -36,6 +37,8 @@ export type WritableLesson = {
   quarter: number;
   year: number;
   date: Date;
+  /** Тема урока — нужна доменным проверкам вида «отметить непонятую тему». */
+  topic: string | null;
   subject: { name: string };
 };
 

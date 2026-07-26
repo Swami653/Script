@@ -1,0 +1,16 @@
+# ВНИМАНИЕ: .vercelignore ЗАМЕНЯЕТ .gitignore при загрузке, поэтому все
+# локальные секреты и артефакты нужно перечислить здесь явно.
+.env
+.env.*
+!.env.example
+.vercel
+.git
+
+# Локальная база: на демо-стенде она создаётся в /tmp при старте
+prisma/dev.db
+prisma/dev.db-journal
+*.db
+
+.next
+node_modules
+docs

@@ -12,6 +12,7 @@ import {
   gradeKindSchema,
   gradeSlotSchema,
   gradeValueSchema,
+  MAX_BULK_GRADES,
   weightForKind,
 } from "@/lib/grades";
 import { prisma } from "@/lib/prisma";
@@ -208,7 +209,7 @@ const setGradesBulkSchema = z.object({
   entries: z
     .array(bulkEntrySchema)
     .min(1, "Не выбрано ни одной оценки")
-    .max(100, "За один раз можно выставить не более 100 оценок"),
+    .max(MAX_BULK_GRADES, `За один раз можно выставить не более ${MAX_BULK_GRADES} оценок`),
 });
 
 /**

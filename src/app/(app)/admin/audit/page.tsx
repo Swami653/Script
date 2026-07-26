@@ -3,7 +3,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 
 import { AuditFilter } from "@/app/(app)/admin/audit/audit-filter";
-import { LocalTime } from "@/app/(app)/admin/audit/local-time";
+import { LocalTime } from "@/components/local-time";
 import { requirePageRole } from "@/lib/auth-guards";
 import { AUDIT_ACTION_LABELS, isAuditAction } from "@/lib/audit-actions";
 import { AUDIT_PAGE_SIZE, getAuditLog } from "@/lib/queries";

@@ -200,7 +200,9 @@ export function JournalToolbar({
         />
       )}
 
-      {bulkOpen && (
+      {/* Условие то же, что у кнопки-переключателя: панель не должна оставаться
+          на экране, когда в четверти не осталось ни одного живого урока */}
+      {bulkOpen && lessons.length > 0 && students.length > 0 && (
         <BulkGradePanel
           /* key — чтобы при смене урока/четверти панель начиналась с чистого выбора */
           key={`${subjectId}-${quarter}-${year}-${className ?? ""}`}

@@ -28,7 +28,14 @@ export async function getActiveYear(): Promise<number> {
 export async function getKnownYears(): Promise<number[]> {
   const [active, lessonYears, periodYears] = await Promise.all([
     getActiveYear(),
-    prisma.lesson.findMany({ distinct: ["year"], select: { year: true } }),
+    // Уроки из корзины не в счёт: год, от которого остались только удалённые
+    // уроки, не должен висеть в переключателе. Восстановить их можно из
+    // «Корзины» — она показывает уроки всех лет сразу.
+    prisma.lesson.findMany({
+      where: { deletedAt: null },
+      distinct: ["year"],
+      select: { year: true },
+    }),
     prisma.quarterPeriod.findMany({ distinct: ["year"], select: { year: true } }),
   ]);
 

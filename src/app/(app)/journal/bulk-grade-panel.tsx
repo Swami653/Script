@@ -10,6 +10,7 @@ import {
   GRADE_KIND_KEYS,
   GRADE_KINDS,
   gradeColorClasses,
+  MAX_BULK_GRADES,
   MAX_GRADE,
   MIN_GRADE,
   type GradeKind,
@@ -44,12 +45,25 @@ export function BulkGradePanel({
   /** studentId -> оценка; отсутствие ключа = «не ставить». */
   const [values, setValues] = useState<Record<string, number>>({});
 
+  /**
+   * Действующий урок вычисляется на рендере, а не хранится вслепую: выбранный
+   * урок могли отправить в корзину прямо из шапки журнала, и тогда состояние
+   * указывало бы на урок, которого в списке уже нет.
+   */
+  const selectedLesson = lessons.some((lesson) => lesson.id === lessonId)
+    ? lessonId
+    : (lessons[lessons.length - 1]?.id ?? "");
+
+  /** Список длиннее серверного лимита — выставить всем разом нельзя. */
+  const tooManyStudents = students.length > MAX_BULK_GRADES;
+
   const count = useMemo(
     () => students.filter((student) => values[student.id] !== undefined).length,
     [students, values],
   );
 
   function setAll(value: number) {
+    if (tooManyStudents) return;
     setValues(Object.fromEntries(students.map((student) => [student.id, value])));
   }
 
@@ -70,9 +84,15 @@ export function BulkGradePanel({
       onError("Выберите хотя бы одну оценку");
       return;
     }
+    if (entries.length > MAX_BULK_GRADES) {
+      onError(
+        `За один раз можно выставить не более ${MAX_BULK_GRADES} оценок — выберите класс в фильтре`,
+      );
+      return;
+    }
 
     startTransition(async () => {
-      const result = await setGradesBulkAction({ lessonId, kind, entries });
+      const result = await setGradesBulkAction({ lessonId: selectedLesson, kind, entries });
       if (!result.ok) {
         onError(`${result.status}: ${result.error}`);
         return;
@@ -89,7 +109,7 @@ export function BulkGradePanel({
           <Label htmlFor="bulk-lesson">Урок</Label>
           <Select
             id="bulk-lesson"
-            value={lessonId}
+            value={selectedLesson}
             onChange={(event) => setLessonId(event.target.value)}
           >
             {lessons.map((lesson) => (
@@ -124,9 +144,15 @@ export function BulkGradePanel({
                 key={value}
                 type="button"
                 onClick={() => setAll(value)}
-                title={`Поставить ${value} всем ученикам списка`}
+                disabled={tooManyStudents}
+                title={
+                  tooManyStudents
+                    ? `В списке ${students.length} учеников — выберите класс в фильтре`
+                    : `Поставить ${value} всем ученикам списка`
+                }
                 className={cn(
                   "focus-ring h-9 w-9 rounded text-sm font-bold tabular-nums transition-transform hover:scale-110",
+                  "disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:scale-100",
                   gradeColorClasses(value),
                 )}
               >
@@ -180,7 +206,11 @@ export function BulkGradePanel({
       </ul>
 
       <div className="flex flex-wrap items-center gap-3 border-t border-rule pt-3">
-        <Button onClick={submit} loading={pending} disabled={count === 0 || !lessonId}>
+        <Button
+          onClick={submit}
+          loading={pending}
+          disabled={count === 0 || !selectedLesson || count > MAX_BULK_GRADES}
+        >
           Сохранить
           {count > 0 && (
             <span className="tabular-nums">
@@ -189,8 +219,17 @@ export function BulkGradePanel({
           )}
         </Button>
         <FieldHint className="flex-1 basis-64">
-          Оценка встаёт в первую позицию клетки и заменяет уже стоящую, отметка «Н»
-          у затронутых учеников снимается. «—» — ученику ничего не ставится.
+          {tooManyStudents ? (
+            <>
+              В списке {students.length} учеников, а за один раз можно выставить не более{" "}
+              {MAX_BULK_GRADES} оценок. Выберите класс в фильтре над журналом.
+            </>
+          ) : (
+            <>
+              Оценка встаёт в первую позицию клетки и заменяет уже стоящую, отметка «Н»
+              у затронутых учеников снимается. «—» — ученику ничего не ставится.
+            </>
+          )}
         </FieldHint>
       </div>
     </div>

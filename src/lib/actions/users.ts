@@ -331,13 +331,23 @@ export async function updateUserRoleAction(input: {
 
     const user = await prisma.user.findUnique({
       where: { id: userId },
-      select: { id: true, role: true },
+      select: { id: true, role: true, name: true, username: true },
     });
     if (!user) return actionFail("Пользователь не найден", 404);
 
     await prisma.user.update({
       where: { id: userId },
       data: { role, className: role === "STUDENT" ? undefined : null },
+    });
+
+    // Смена роли — самое чувствительное действие администратора: именно она
+    // выдаёт право менять оценки, поэтому в журнале изменений видны и прежняя
+    // роль, и новая.
+    await logAudit({
+      actor: admin,
+      action: "user.role",
+      targetName: `${user.name} (${user.username})`,
+      details: `Роль изменена: ${ROLE_LABELS[asRole(user.role)]} → ${ROLE_LABELS[role]}`,
     });
 
     revalidatePath("/admin");

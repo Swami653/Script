@@ -276,7 +276,7 @@ export async function destroyLessonAction(input: {
 
     await logAudit({
       actor: teacher,
-      action: "lesson.delete",
+      action: "lesson.destroy",
       subjectName: lesson.subject.name,
       details:
         `${lessonRef(lesson.subject.name, lesson.date)} удалён навсегда ` +

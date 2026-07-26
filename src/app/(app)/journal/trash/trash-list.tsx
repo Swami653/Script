@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
 
 import { Flash, useFlash } from "@/components/flash";
+import { LocalTime } from "@/components/local-time";
 import { Button } from "@/components/ui/button";
 import { destroyLessonAction, restoreLessonAction } from "@/lib/actions/lessons";
 import { formatDateLong, pluralize } from "@/lib/utils";
@@ -93,7 +94,10 @@ export function TrashList({ lessons }: { lessons: TrashedLesson[] }) {
                 {lesson.quarter} четверть {lesson.year}/{lesson.year + 1} · оценок:{" "}
                 <span className="tabular-nums">{lesson.grades}</span> · отметок «Н»:{" "}
                 <span className="tabular-nums">{lesson.absences}</span> · удалён{" "}
-                {formatDateLong(lesson.deletedAt)}
+                {/* deletedAt — настоящий момент времени, а не «полночь UTC» как дата
+                    урока: показываем его в поясе браузера, иначе восточнее Гринвича
+                    сегодняшнее удаление выглядит вчерашним */}
+                <LocalTime iso={lesson.deletedAt} />
               </p>
             </div>
 

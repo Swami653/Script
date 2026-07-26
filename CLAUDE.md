@@ -225,6 +225,8 @@ prisma/
   schema.prisma          User · Subject · Lesson · Grade · QuarterPeriod · AppSetting
                          · QuarterLock · QuarterResult · Debt
                          · LessonStamp · MasteryMark · QuarterNote (безотметочные 1–2 классы)
+                         · ParentLink · GradeAck · TelegramLink · TelegramLinkCode
+                         · NotificationEvent (семья и уведомления)
   migrations/            история изменений схемы (prisma migrate)
   bootstrap.ts           очистка по RESET_DATA + создание администратора
 src/
@@ -248,9 +250,13 @@ src/
     quarters.ts          ★ границы четвертей: какая идёт сейчас, в какую попал урок
     school-year.ts       активный учебный год (AppSetting) и список известных лет
     students-import.ts   разбор списка ФИО и генерация логинов (изоморфный)
-    password.ts          генерация временных паролей (только сервер)
+    password.ts          генерация временных паролей и кодов привязки (только сервер)
+    signals.ts           ★ сигналы «требует внимания»: чистый движок без prisma,
+                           не хранятся, ученику не показываются
+    telegram.ts          отправитель Telegram (не бросает; фамилий и комментариев нет)
+    telegram-notify.ts   drainNotifications — дренаж outbox, дайджесты родителям
     actions/             ★ Server Actions: grades · gradeless · lessons · subjects · users
-                           · quarters · debts · auth
+                           · quarters · debts · auth · family · telegram
   app/
     login/               страница входа
     (app)/               общий каркас: журнал, дневник, админка, профиль
@@ -260,7 +266,13 @@ src/
       journal/year/      границы четвертей и активный учебный год
       student/subject/   разбор оценок ученика по одному предмету
       student/gradeless-view.tsx  безотметочный дневник 1–2 класса (лист печатей)
+      family/            семейный экран: карточки детей, дневник ребёнка,
+                         разбор по предмету с кнопками «Ознакомлен»
+      admin/parents/     раздел «Семьи»: родители, привязки, коды Telegram
+      admin/attention/   список «Требует внимания» (сигналы, только чтение)
     api/journal/export/  Route Handler: CSV-экспорт с проверкой роли
+    api/telegram/webhook/     приём апдейтов бота (secret_token, ответы без имён)
+    api/notifications/drain/  страховочный дренаж outbox (Vercel Cron, CRON_SECRET)
   components/            UI-компоненты (closed-stamp — штамп «Закрыта»,
                          stamp-seal — оттиск печати, level-chip — чип уровня)
 ```
@@ -403,6 +415,16 @@ Vercel применит её сама. Так сделана миграция `1
 - Не конвертировать уровни освоения в баллы (никаких high→8), не хранить
   признак безотметочности в БД и не рендерить уровень одиночной буквой «Н»
   (см. §1.5).
-- Не хранить пароли иначе как `bcrypt.hash(password, 10)`.
+- Не хранить пароли иначе как `bcrypt.hash(password, 10)`; код привязки
+  Telegram — только SHA-256-хешем, показывается один раз.
+- Не читать данные ученика по `studentId` мимо `requireOwnChild` и не отвечать
+  родителю 403 на чужого ребёнка — только 404 «Ученик не найден».
+- Не удалять `GradeAck` при правке оценки (подпись — документ; «устарел»
+  выводится по `seenValue !== value`) и не помечать штамп по `updatedAt`.
+- Не отправлять в Telegram фамилию ребёнка, комментарий учителя, сигналы и
+  средние; не показывать родителю сигнал «нет оценок три недели», а ученику —
+  сигналы вообще; не хранить сигналы в БД и не выгружать их в CSV/ведомости.
 - Не коммитить `.env` и `prisma/dev.db` (уже в `.gitignore`).
 - Не добавлять `enum` в схему Prisma (SQLite их не поддерживает).
+- Не заводить каталог миграции с номером `10_` и больше без перехода на
+  двузначные имена: лексикографический порядок поставит его между `1_` и `2_`.

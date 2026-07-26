@@ -55,6 +55,35 @@ export function parseDateInputValue(value: string): Date {
   return date;
 }
 
+/** Короткие названия дней недели. Индексация совпадает с Date.getUTCDay(): 0 — вс. */
+export const WEEKDAYS_SHORT = ["вс", "пн", "вт", "ср", "чт", "пт", "сб"] as const;
+
+/** «пт» — день недели UTC-датой (локальные getDay() запрещены — дата поедет). */
+export function formatWeekdayShort(date: Date | string): string {
+  return WEEKDAYS_SHORT[new Date(date).getUTCDay()]!;
+}
+
+/** date + days суток (полуночи UTC остаются полуночами UTC). */
+export function addUtcDays(date: Date, days: number): Date {
+  const next = new Date(date);
+  next.setUTCDate(next.getUTCDate() + days);
+  return next;
+}
+
+/** Целых суток между полуночами UTC: a − b. */
+export function diffUtcDays(a: Date, b: Date): number {
+  return Math.round((a.getTime() - b.getTime()) / 86_400_000);
+}
+
+/**
+ * Сегодняшняя полночь UTC — единый предикат «прошедший урок» для всего
+ * интерфейса. Осознанная норма проекта: границу «сегодня» считаем по UTC,
+ * как и даты уроков, а не по локальному времени браузера.
+ */
+export function todayUtcMidnight(): Date {
+  return parseDateInputValue(toDateInputValue(new Date()));
+}
+
 /** "Иванов Иван Иванович" -> "ИИ" */
 export function initials(name: string): string {
   const parts = name.trim().split(/\s+/).filter(Boolean);

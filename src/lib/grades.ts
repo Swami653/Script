@@ -138,6 +138,91 @@ export function weightedAverage(
   return roundTo(weighted / total, 2);
 }
 
+/** «% качества» — доля писавших учеников с оценкой QUALITY_MIN_GRADE..10. */
+export const QUALITY_MIN_GRADE = 7;
+/** «% успеваемости» — доля писавших учеников с оценкой PASSING_MIN_GRADE..10. */
+export const PASSING_MIN_GRADE = 4;
+
+/** Итог анализа одного столбца журнала (панель «Анализ урока»). */
+export type LessonAnalysis = {
+  /** Длина 10, индекс = оценка − 1. По оценке СЛОТА 0 каждого писавшего ученика. */
+  distribution: number[];
+  /** По ВСЕМ оценкам столбца (обе половинки «10/9») — совпадает со строкой итогов. */
+  average: number | null;
+  /** Целые проценты (roundTo(x, 0)); null, если никто не писал. База — gradedCount. */
+  qualityPercent: number | null;
+  passingPercent: number | null;
+  /** Писавших: учеников с хотя бы одной оценкой за урок. */
+  gradedCount: number;
+  /** ФИО с отметкой «Н». */
+  absentNames: string[];
+  /** ФИО без оценки и без «Н». */
+  emptyNames: string[];
+};
+
+/**
+ * Анализ одного столбца журнала. grades каждого ученика — по возрастанию слота.
+ *
+ * Две базы подсчёта — намеренно разные:
+ *  * средний — по ВСЕМ оценкам столбца (иначе он разошёлся бы со строкой
+ *    итогов журнала, которая считает обе половинки «10/9»);
+ *  * гистограмма и проценты качества/успеваемости — по УЧЕНИКАМ (оценка
+ *    слота 0): вторая половинка «10/9» не должна удваивать одного ученика.
+ * Средний — делегированием weightedAverage (формула не дублируется).
+ */
+export function analyzeLessonColumn(
+  students: readonly {
+    name: string;
+    grades: readonly { value: number; weight: number }[];
+    absent: boolean;
+  }[],
+): LessonAnalysis {
+  const distribution = Array.from({ length: MAX_GRADE }, () => 0);
+  const allGrades: { value: number; weight: number }[] = [];
+  const absentNames: string[] = [];
+  const emptyNames: string[] = [];
+  let gradedCount = 0;
+  let qualityCount = 0;
+  let passingCount = 0;
+
+  for (const student of students) {
+    if (student.grades.length > 0) {
+      gradedCount += 1;
+      allGrades.push(...student.grades);
+      const first = student.grades[0]!.value;
+      if (first >= MIN_GRADE && first <= MAX_GRADE) distribution[first - 1]! += 1;
+      if (first >= QUALITY_MIN_GRADE) qualityCount += 1;
+      if (first >= PASSING_MIN_GRADE) passingCount += 1;
+    } else if (student.absent) {
+      absentNames.push(student.name);
+    } else {
+      emptyNames.push(student.name);
+    }
+  }
+
+  return {
+    distribution,
+    average: weightedAverage(allGrades),
+    qualityPercent: gradedCount > 0 ? roundTo((100 * qualityCount) / gradedCount, 0) : null,
+    passingPercent: gradedCount > 0 ? roundTo((100 * passingCount) / gradedCount, 0) : null,
+    gradedCount,
+    absentNames,
+    emptyNames,
+  };
+}
+
+/**
+ * Прогноз среднего: каким станет средний балл, если добавить оценку value.
+ * Чистая функция, ничего не пишет. Вес гипотетической оценки —
+ * weightForKind("regular"), не литерал: прогноз переживёт возврат неравных весов.
+ */
+export function projectedAverage(
+  items: readonly { value: number; weight: number }[],
+  value: number,
+): number | null {
+  return weightedAverage([...items, { value, weight: weightForKind("regular") }]);
+}
+
 /**
  * Годовая оценка по предмету — целое число 1..10.
  * Считается как среднее средних баллов четвертей (учитываются только

@@ -127,7 +127,12 @@ function reviewSummaryText(review: QuarterReview): string {
   );
 }
 
-/** Строки снимка-ведомости из данных мастера (denorm-поля — только из ключа замка). */
+/**
+ * Строки снимка-ведомости из данных мастера (denorm-поля — только из ключа
+ * замка). Безотметочные ученики (1–2 классы) фиксируются строками
+ * gradeless: true БЕЗ среднего и отметки («б/о», не «н/а»), с текстом
+ * характеристики на момент закрытия — ведомость обязана быть полным документом.
+ */
 function snapshotRows(
   review: QuarterReview,
   lockId: string,
@@ -135,19 +140,40 @@ function snapshotRows(
   year: number,
   quarter: number,
 ) {
-  return review.rows.map((row) => ({
-    lockId,
-    studentId: row.student.id,
-    studentName: row.student.name,
-    className: row.student.className,
-    subjectId,
-    year,
-    quarter,
-    average: row.average,
-    finalGrade: row.proposed,
-    gradeCount: row.gradeCount,
-    absenceCount: row.absenceCount,
-  }));
+  return [
+    ...review.rows.map((row) => ({
+      lockId,
+      studentId: row.student.id,
+      studentName: row.student.name,
+      className: row.student.className,
+      subjectId,
+      year,
+      quarter,
+      average: row.average,
+      finalGrade: row.proposed,
+      gradeCount: row.gradeCount,
+      absenceCount: row.absenceCount,
+      gradeless: false,
+      note: null as string | null,
+    })),
+    ...review.gradelessRows.map((row) => ({
+      lockId,
+      studentId: row.student.id,
+      studentName: row.student.name,
+      className: row.student.className,
+      subjectId,
+      year,
+      quarter,
+      // Средний и отметка у безотметочного не существуют — null всегда,
+      // даже при исторических оценках после перевода классов.
+      average: null as number | null,
+      finalGrade: null as number | null,
+      gradeCount: row.gradeCount,
+      absenceCount: row.absenceCount,
+      gradeless: true,
+      note: row.note,
+    })),
+  ];
 }
 
 function isUniqueViolation(error: unknown): boolean {

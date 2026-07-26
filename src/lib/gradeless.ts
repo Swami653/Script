@@ -59,6 +59,18 @@ export function isGradelessClassName(className: string | null | undefined): bool
 }
 
 /**
+ * Система оценивания строки журнала/дневника. Только подсказка интерфейсу,
+ * что рисовать и какое пустое состояние показывать: читалки отдают
+ * фактические данные независимо от текущего className (история переживает
+ * перевод 2→3), а инвариант записи держит requireMarkTarget на сервере.
+ */
+export type Assessment = "graded" | "gradeless";
+
+export function assessmentOf(className: string | null | undefined): Assessment {
+  return isGradelessClassName(className) ? "gradeless" : "graded";
+}
+
+/**
  * Печати-поощрения за урок. Ключ хранится в LessonStamp.kind (без CHECK в БД:
  * словарь расширяемый, прецедент Grade.kind). Порядок ключей = порядок
  * отображения. Виды только добавляются — удаление осиротило бы старые записи.

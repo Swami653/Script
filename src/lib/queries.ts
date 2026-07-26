@@ -239,6 +239,14 @@ export type StudentSubjectReport = {
   quarterAverages: (number | null)[];
   /** Количество оценок по четвертям — чтобы показать «нет оценок» честно */
   quarterCounts: number[];
+  /**
+   * Официальные четвертные отметки из снимков закрытых четвертей (QuarterResult).
+   * null на позиции закрытой четверти означает «н/а»; у открытых четвертей
+   * отметки не существует нигде — смотрите quarterAverages.
+   */
+  quarterFinals: (number | null)[];
+  /** Закрыта ли четверть (есть строка снимка). Индексация как у quarterAverages. */
+  closedQuarters: boolean[];
   /** Пропусков по предмету за год */
   absences: number;
   year: number | null;
@@ -274,7 +282,7 @@ export async function getStudentReport(
   });
   if (!student) return null;
 
-  const [subjects, grades, absences] = await Promise.all([
+  const [subjects, grades, absences, finals] = await Promise.all([
     prisma.subject.findMany({ orderBy: { name: "asc" }, select: { id: true, name: true } }),
     prisma.grade.findMany({
       where: { studentId, year, lesson: LIVE_LESSON },
@@ -284,6 +292,12 @@ export async function getStudentReport(
       by: ["subjectId"],
       where: { studentId, year, lesson: LIVE_LESSON },
       _count: { _all: true },
+    }),
+    // Официальные отметки закрытых четвертей — из снимков-ведомостей.
+    // Переоткрытие удаляет снимок каскадом, и отметка сама исчезает из дневника.
+    prisma.quarterResult.findMany({
+      where: { studentId, year },
+      select: { subjectId: true, quarter: true, finalGrade: true },
     }),
   ]);
 
@@ -297,6 +311,19 @@ export async function getStudentReport(
 
   const absenceBySubject = new Map(absences.map((a) => [a.subjectId, a._count._all]));
 
+  const finalsBySubject = new Map<string, (number | null)[]>();
+  const closedBySubject = new Map<string, boolean[]>();
+  for (const row of finals) {
+    const index = row.quarter - 1;
+    if (index < 0 || index > 3) continue;
+    const subjectFinals = finalsBySubject.get(row.subjectId) ?? [null, null, null, null];
+    const subjectClosed = closedBySubject.get(row.subjectId) ?? [false, false, false, false];
+    subjectFinals[index] = row.finalGrade;
+    subjectClosed[index] = true;
+    finalsBySubject.set(row.subjectId, subjectFinals);
+    closedBySubject.set(row.subjectId, subjectClosed);
+  }
+
   const subjectReports: StudentSubjectReport[] = subjects.map((subject) => {
     const perQuarter = bySubject.get(subject.id) ?? [[], [], [], []];
     const quarterAverages = perQuarter.map((items) => weightedAverage(items));
@@ -306,7 +333,11 @@ export async function getStudentReport(
       subjectName: subject.name,
       quarterAverages,
       quarterCounts: perQuarter.map((items) => items.length),
+      quarterFinals: finalsBySubject.get(subject.id) ?? [null, null, null, null],
+      closedQuarters: closedBySubject.get(subject.id) ?? [false, false, false, false],
       absences: absenceBySubject.get(subject.id) ?? 0,
+      // Годовая — ТОЛЬКО от живых средних четвертей (правило 1.2):
+      // finalGrade — документ, в годовую он не входит.
       year: yearGrade(quarterAverages),
     };
   });

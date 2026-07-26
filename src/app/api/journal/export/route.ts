@@ -42,13 +42,33 @@ export async function GET(request: NextRequest) {
 
     const quarter = quarterParam as Quarter;
     const year = Number.isInteger(yearParam) ? yearParam : await getActiveYear();
-    const data = await getJournalData(subjectId, quarter, year, className);
+    const [data, lock] = await Promise.all([
+      getJournalData(subjectId, quarter, year, className),
+      prisma.quarterLock.findUnique({
+        where: { subjectId_year_quarter: { subjectId, year, quarter } },
+        select: { id: true },
+      }),
+    ]);
+
+    // Четверть закрыта — добавляется колонка «Итог» с официальной отметкой из
+    // снимка-ведомости («н/а» для неаттестованных). «Средний» остаётся живым.
+    const finals = lock
+      ? new Map(
+          (
+            await prisma.quarterResult.findMany({
+              where: { lockId: lock.id },
+              select: { studentId: true, finalGrade: true },
+            })
+          ).map((row) => [row.studentId, row.finalGrade]),
+        )
+      : null;
 
     const headers = [
       "Ученик",
       "Класс",
       ...data.lessons.map((lesson) => formatDateShort(lesson.date)),
       `Средний за ${quarter} четв.`,
+      ...(finals ? ["Итог"] : []),
       "Годовая",
     ];
 
@@ -64,6 +84,7 @@ export async function GET(request: NextRequest) {
           .join("/");
       }),
       formatAverage(row.average),
+      ...(finals ? [finals.get(row.student.id) ?? "н/а"] : []),
       row.year ?? "",
     ]);
 

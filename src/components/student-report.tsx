@@ -93,6 +93,31 @@ export function StudentReportView({
                   {QUARTERS.map((quarter) => {
                     const average = subject.quarterAverages[quarter - 1] ?? null;
                     const count = subject.quarterCounts[quarter - 1] ?? 0;
+                    const closed = subject.closedQuarters[quarter - 1] ?? false;
+                    const final = subject.quarterFinals[quarter - 1] ?? null;
+
+                    // Закрытая четверть: официальная отметка из снимка-ведомости
+                    // (чип в цветах шкалы), «н/а» — не аттестован. Открытая —
+                    // живой средний, как раньше: отметки ещё не существует.
+                    if (closed) {
+                      return (
+                        <td key={quarter} className="border-b border-rule px-3 py-1 text-center">
+                          <span
+                            className={cn(
+                              "inline-flex h-7 min-w-9 items-center justify-center rounded px-1 font-bold tabular-nums",
+                              final !== null ? "text-[15px]" : "text-[11px]",
+                              gradeColorClasses(final),
+                            )}
+                            title={`Четвертная отметка — четверть закрыта${
+                              average !== null ? ` (средний ${formatAverage(average)})` : ""
+                            }`}
+                          >
+                            {final ?? "н/а"}
+                          </span>
+                        </td>
+                      );
+                    }
+
                     return (
                       <td key={quarter} className="border-b border-rule px-3 text-center">
                         <span
@@ -165,6 +190,8 @@ export function StudentReportView({
       </div>
       <p className="mt-1.5 px-1 text-xs text-muted-foreground">
         Средний балл за четверть округляется до сотых, годовая оценка — до целого числа от 1 до 10.
+        Цветной чип вместо среднего — официальная четвертная отметка: такая четверть закрыта,
+        «н/а» — не аттестован.
         {subjectHref && " Нажмите на предмет, чтобы увидеть даты уроков и темы."}
       </p>
     </section>

@@ -17,6 +17,7 @@ const NAV_BY_ROLE: Record<Role, { href: string; label: string; exact?: boolean }
     { href: "/journal/debts", label: "Долги" },
     { href: "/journal/year", label: "Учебный год" },
     { href: "/admin/audit", label: "Изменения" },
+    { href: "/admin/backup", label: "Резервные копии" },
   ],
   TEACHER: [
     { href: "/journal", label: "Журнал", exact: true },

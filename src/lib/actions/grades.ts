@@ -7,6 +7,7 @@ import { actionError, actionFail, actionOk, type ActionResult } from "@/lib/acti
 import { lessonRef, logAudit } from "@/lib/audit";
 import { requireRole } from "@/lib/auth-guards";
 import { syncControlDebts } from "@/lib/debts";
+import { isGradelessClassName } from "@/lib/gradeless";
 import {
   asGradeKind,
   GRADE_KINDS,
@@ -16,7 +17,7 @@ import {
   MAX_BULK_GRADES,
   weightForKind,
 } from "@/lib/grades";
-import { requireWritableLesson } from "@/lib/lesson-guards";
+import { requireMarkTarget, requireWritableLesson } from "@/lib/lesson-guards";
 import { prisma } from "@/lib/prisma";
 import { GRADE_EDITOR_ROLES } from "@/lib/roles";
 import { pluralize } from "@/lib/utils";
@@ -31,6 +32,12 @@ import { pluralize } from "@/lib/utils";
  * ВТОРОЕ ПРАВИЛО: урок для записи берётся ТОЛЬКО через requireWritableLesson
  * (src/lib/lesson-guards.ts) — единственную дверь, которая сама отказывает,
  * если урока нет, он в корзине или его четверть закрыта замком (423).
+ *
+ * ТРЕТЬЕ ПРАВИЛО: ученик берётся ТОЛЬКО через requireMarkTarget — гвард
+ * отклоняет не-учеников (404) и сверяет политику оценивания с классом:
+ * балл ученику безотметочного 1–2 класса невозможен (409, policy "graded");
+ * «Н» и удаления универсальны (policy "any"). Формула действия с клеткой:
+ * requireRole → zod → requireWritableLesson → requireMarkTarget.
  *
  * За один урок ученику можно поставить до MAX_GRADES_PER_LESSON оценок
  * («10/9» за контрольную) — это отдельные целые оценки, каждая из которых
@@ -102,22 +109,15 @@ export async function setGradeAction(input: {
     const weight = weightForKind(kind);
     const comment = parsed.comment?.trim() || null;
 
+    // Балл ученику безотметочного 1–2 класса невозможен — policy "graded".
     const [lesson, student, cellGrades] = await Promise.all([
       requireWritableLesson(parsed.lessonId),
-      prisma.user.findUnique({
-        where: { id: parsed.studentId },
-        select: { id: true, role: true, name: true },
-      }),
+      requireMarkTarget(parsed.studentId, "graded"),
       prisma.grade.findMany({
         where: { studentId: parsed.studentId, lessonId: parsed.lessonId },
         select: { slot: true, value: true },
       }),
     ]);
-
-    if (!student) return actionFail("Ученик не найден", 404);
-    if (student.role !== "STUDENT") {
-      return actionFail("Оценку можно выставить только ученику", 400);
-    }
 
     // Вторую оценку нельзя поставить «через дырку»: сначала первая, потом вторая.
     if (parsed.slot > 0 && !cellGrades.some((grade) => grade.slot === parsed.slot - 1)) {
@@ -162,10 +162,17 @@ export async function setGradeAction(input: {
       select: { id: true, value: true, slot: true, studentId: true, lessonId: true },
     });
 
-    // Оценка и «Н» взаимоисключающи: выставили оценку — отметка отсутствия снимается.
-    await prisma.absence.deleteMany({
-      where: { studentId: parsed.studentId, lessonId: parsed.lessonId },
-    });
+    // Клетка содержит одно из: оценки | уровень | «Н» — выставили оценку,
+    // отметка отсутствия и уровень освоения (данные окна деплоя или перевода
+    // классов) снимаются одной транзакцией.
+    await prisma.$transaction([
+      prisma.absence.deleteMany({
+        where: { studentId: parsed.studentId, lessonId: parsed.lessonId },
+      }),
+      prisma.masteryMark.deleteMany({
+        where: { studentId: parsed.studentId, lessonId: parsed.lessonId },
+      }),
+    ]);
 
     await logAudit({
       actor: teacher,
@@ -245,11 +252,24 @@ export async function setGradesBulkAction(input: {
       requireWritableLesson(parsed.lessonId),
       prisma.user.findMany({
         where: { id: { in: studentIds }, role: "STUDENT" },
-        select: { id: true },
+        select: { id: true, name: true, className: true },
       }),
     ]);
     if (students.length !== studentIds.length) {
       return actionFail("Часть учеников не найдена или не является учениками", 400);
+    }
+
+    // Гейт безотметочности: среди целей есть ученики 1–2 классов — отклоняется
+    // ВЕСЬ батч до транзакции, с именами (учитель должен видеть, кого снять).
+    const gradelessTargets = students.filter((student) =>
+      isGradelessClassName(student.className),
+    );
+    if (gradelessTargets.length > 0) {
+      return actionFail(
+        "В 1–2 классах оценки не выставляются: " +
+          gradelessTargets.map((student) => student.name).join(", "),
+        409,
+      );
     }
 
     // Одна транзакция на весь список: либо оценки получают все, либо никто.
@@ -283,8 +303,12 @@ export async function setGradesBulkAction(input: {
           },
         }),
       ),
-      // Оценка и «Н» взаимоисключающи — снимаем отметки у затронутых.
+      // Клетка эксклюзивна — у затронутых снимаются «Н» и (исторические,
+      // после перевода классов) уровни освоения.
       prisma.absence.deleteMany({
+        where: { lessonId: lesson.id, studentId: { in: studentIds } },
+      }),
+      prisma.masteryMark.deleteMany({
         where: { lessonId: lesson.id, studentId: { in: studentIds } },
       }),
     ]);
@@ -329,16 +353,16 @@ export async function deleteGradeAction(input: {
       slot: normalizeNumberInput(input.slot ?? 0),
     });
 
+    // Удаление — policy "any": чистка доступна и после перевода между системами.
     const [lesson, student, cellGrades] = await Promise.all([
       requireWritableLesson(parsed.lessonId),
-      prisma.user.findUnique({ where: { id: parsed.studentId }, select: { name: true } }),
+      requireMarkTarget(parsed.studentId, "any"),
       prisma.grade.findMany({
         where: { studentId: parsed.studentId, lessonId: parsed.lessonId },
         orderBy: { slot: "asc" },
         select: { id: true, slot: true, value: true },
       }),
     ]);
-    if (!student) return actionFail("Ученик не найден", 404);
 
     const target = cellGrades.find((grade) => grade.slot === parsed.slot);
     if (!target) return actionOk(null, "Оценки не было");
@@ -389,14 +413,18 @@ export async function setAbsenceAction(input: {
     const studentId = z.string().min(1).parse(input.studentId);
     const lessonId = z.string().min(1).parse(input.lessonId);
 
+    // «Н» универсальна — policy "any": посещаемость отмечается и в 1–2 классах.
     const [lesson, student] = await Promise.all([
       requireWritableLesson(lessonId),
-      prisma.user.findUnique({ where: { id: studentId }, select: { id: true, role: true, name: true } }),
+      requireMarkTarget(studentId, "any"),
     ]);
-    if (!student || student.role !== "STUDENT") return actionFail("Ученик не найден", 404);
 
-    const [removedGrades] = await prisma.$transaction([
+    // Клетка содержит одно из: оценки | уровень | «Н» — отметка отсутствия
+    // вытесняет из клетки оценки, уровень освоения и печати одной транзакцией.
+    const [removedGrades, removedMastery, removedStamps] = await prisma.$transaction([
       prisma.grade.deleteMany({ where: { studentId, lessonId } }),
+      prisma.masteryMark.deleteMany({ where: { studentId, lessonId } }),
+      prisma.lessonStamp.deleteMany({ where: { studentId, lessonId } }),
       prisma.absence.upsert({
         where: { studentId_lessonId: { studentId, lessonId } },
         create: {
@@ -418,7 +446,9 @@ export async function setAbsenceAction(input: {
       subjectName: lesson.subject.name,
       details:
         `${lessonRef(lesson.subject.name, lesson.date)}: отмечено отсутствие («Н»)` +
-        (removedGrades.count > 0 ? `, снято оценок: ${removedGrades.count}` : ""),
+        (removedGrades.count > 0 ? `, снято оценок: ${removedGrades.count}` : "") +
+        (removedMastery.count > 0 ? ", уровень снят" : "") +
+        (removedStamps.count > 0 ? `, печатей снято: ${removedStamps.count}` : ""),
     });
 
     // Именно здесь рождаются авто-долги: «Н» на прошедшей контрольной.
@@ -444,9 +474,8 @@ export async function clearAbsenceAction(input: {
 
     const [lesson, student] = await Promise.all([
       requireWritableLesson(lessonId),
-      prisma.user.findUnique({ where: { id: studentId }, select: { name: true } }),
+      requireMarkTarget(studentId, "any"),
     ]);
-    if (!student) return actionFail("Ученик не найден", 404);
 
     const { count } = await prisma.absence.deleteMany({ where: { studentId, lessonId } });
 
@@ -483,9 +512,8 @@ export async function clearCellAction(input: {
 
     const [lesson, student] = await Promise.all([
       requireWritableLesson(lessonId),
-      prisma.user.findUnique({ where: { id: studentId }, select: { name: true } }),
+      requireMarkTarget(studentId, "any"),
     ]);
-    if (!student) return actionFail("Ученик не найден", 404);
 
     const { count } = await prisma.grade.deleteMany({ where: { studentId, lessonId } });
 

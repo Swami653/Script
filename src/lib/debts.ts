@@ -1,3 +1,4 @@
+import { isGradelessClassName } from "@/lib/gradeless";
 import { isControlLesson } from "@/lib/grades";
 import { prisma } from "@/lib/prisma";
 import { todayUtcMidnight } from "@/lib/utils";
@@ -21,6 +22,12 @@ import { todayUtcMidnight } from "@/lib/utils";
  * НИКОГДА не трогаются: ручные долги (origin "manual"), прощённые (clearedAt —
  * надгробие) и закрытые оценкой (история «сдал»; статус закрытия не хранится,
  * а выводится по EXISTS Grade).
+ *
+ * БЕЗОТМЕТОЧНЫЕ (1–2 классы, isGradelessClassName): долг закрывается ОЦЕНКОЙ,
+ * которой у первоклассника не бывает, поэтому авто-долг ему не рождается —
+ * урок общий для предмета, и «Н» семилетки на контрольной 3-го класса не
+ * должно вешать на него несдаваемый долг. Существующий авто-долг ученика,
+ * ставшего безотметочным (перевод 3→2), растворяется как потерявший основание.
  */
 export async function syncControlDebts(lessonId: string): Promise<void> {
   try {
@@ -63,9 +70,27 @@ export async function syncControlDebts(lessonId: string): Promise<void> {
     const absentStudents = new Set(absences.map((absence) => absence.studentId));
     const debtStudents = new Set(debts.map((debt) => debt.studentId));
 
+    // Безотметочные ученики среди отсутствующих и должников — один запрос
+    // классов, только когда есть кого проверять.
+    const checkIds = [...new Set([...absentStudents, ...debtStudents])];
+    const gradelessStudents = new Set(
+      checkIds.length > 0
+        ? (
+            await prisma.user.findMany({
+              where: { id: { in: checkIds } },
+              select: { id: true, className: true },
+            })
+          )
+            .filter((user) => isGradelessClassName(user.className))
+            .map((user) => user.id)
+        : [],
+    );
+
     // (а) Создание авто-долгов. skipDuplicates гасит гонку параллельных касаний.
     if (isControl && isPast) {
-      const missing = [...absentStudents].filter((studentId) => !debtStudents.has(studentId));
+      const missing = [...absentStudents].filter(
+        (studentId) => !debtStudents.has(studentId) && !gradelessStudents.has(studentId),
+      );
       if (missing.length > 0) {
         await prisma.debt.createMany({
           data: missing.map((studentId) => ({
@@ -88,7 +113,10 @@ export async function syncControlDebts(lessonId: string): Promise<void> {
         debt.origin === "auto" &&
         debt.clearedAt === null &&
         !gradedStudents.has(debt.studentId) &&
-        (!isControl || !isPast || !absentStudents.has(debt.studentId)),
+        (!isControl ||
+          !isPast ||
+          !absentStudents.has(debt.studentId) ||
+          gradelessStudents.has(debt.studentId)),
     );
     if (dissolve.length > 0) {
       await prisma.debt.deleteMany({ where: { id: { in: dissolve.map((debt) => debt.id) } } });

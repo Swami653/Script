@@ -6,7 +6,8 @@ import { z } from "zod";
 import { actionError, actionFail, actionOk, type ActionResult } from "@/lib/action-result";
 import { lessonRef, logAudit } from "@/lib/audit";
 import { requireRole } from "@/lib/auth-guards";
-import { requireLiveLesson } from "@/lib/lesson-guards";
+import { isGradelessClassName } from "@/lib/gradeless";
+import { requireLiveLesson, requireMarkTarget } from "@/lib/lesson-guards";
 import { prisma } from "@/lib/prisma";
 import { GRADE_EDITOR_ROLES } from "@/lib/roles";
 
@@ -39,14 +40,16 @@ export async function markDebtAction(input: {
 
     const [lesson, student] = await Promise.all([
       requireLiveLesson(parsed.lessonId),
-      prisma.user.findUnique({
-        where: { id: parsed.studentId },
-        select: { id: true, role: true, name: true },
-      }),
+      requireMarkTarget(parsed.studentId, "any"),
     ]);
-    if (!student) return actionFail("Ученик не найден", 404);
-    if (student.role !== "STUDENT") {
-      return actionFail("Долг можно отметить только ученику", 400);
+    // Долг закрывается оценкой, которой у безотметочного ученика не бывает, —
+    // несдаваемый долг вешать нельзя (policy "any" + доменный отказ с понятным
+    // текстом вместо сообщения гварда про оценки).
+    if (isGradelessClassName(student.className)) {
+      return actionFail(
+        "В 1–2 классах долги не отмечаются: безотметочное обучение",
+        409,
+      );
     }
 
     const debt = await prisma.debt.upsert({

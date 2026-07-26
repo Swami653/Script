@@ -26,6 +26,7 @@ export function JournalToolbar({
   years,
   year,
   hasPeriods,
+  topicSuggestions,
   lessons,
   students,
 }: {
@@ -37,6 +38,8 @@ export function JournalToolbar({
   years: number[];
   year: number;
   hasPeriods: boolean;
+  /** Темы прошлых уроков предмета — подсказки в поле темы нового урока. */
+  topicSuggestions: string[];
   /** Уроки выбранной четверти — для панели массового выставления. */
   lessons: BulkLesson[];
   /** Ученики журнала (с учётом фильтра по классу). */
@@ -187,6 +190,7 @@ export function JournalToolbar({
           subjectId={subjectId}
           quarter={quarter}
           hasPeriods={hasPeriods}
+          topicSuggestions={topicSuggestions}
           onDone={(message) => {
             setAddOpen(false);
             show("success", message);
@@ -261,12 +265,14 @@ function AddLessonForm({
   subjectId,
   quarter,
   hasPeriods,
+  topicSuggestions,
   onDone,
   onError,
 }: {
   subjectId: string;
   quarter: Quarter;
   hasPeriods: boolean;
+  topicSuggestions: string[];
   onDone: (message: string) => void;
   onError: (message: string) => void;
 }) {
@@ -335,7 +341,14 @@ function AddLessonForm({
           onChange={(event) => setTopic(event.target.value)}
           placeholder="Квадратные уравнения"
           maxLength={120}
+          list="lesson-topic-suggestions"
         />
+        {/* Подсказки — темы прошлых уроков этого предмета (все годы) */}
+        <datalist id="lesson-topic-suggestions">
+          {topicSuggestions.map((suggestion) => (
+            <option key={suggestion} value={suggestion} />
+          ))}
+        </datalist>
       </div>
 
       <Button type="submit" loading={pending}>

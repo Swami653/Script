@@ -17,6 +17,7 @@ import {
   getJournalData,
   getQuartersWithLessons,
   getSubjects,
+  getTopicSuggestions,
 } from "@/lib/queries";
 import { currentQuarter } from "@/lib/quarters";
 import { GRADE_EDITOR_ROLES } from "@/lib/roles";
@@ -60,7 +61,11 @@ export default async function JournalPage({ searchParams }: { searchParams: Sear
     subjects.find((subject) => subject.id === params.subject)?.id ?? subjects[0]!.id;
   const subjectName = subjects.find((subject) => subject.id === subjectId)!.name;
 
-  const periods = await getQuarterPeriods(year);
+  // Темы прошлых уроков предмета — подсказки в форме создания урока.
+  const [periods, topicSuggestions] = await Promise.all([
+    getQuarterPeriods(year),
+    getTopicSuggestions(subjectId),
+  ]);
 
   const requestedQuarter = Number(params.quarter);
   const quarter: Quarter = isValidQuarter(requestedQuarter)
@@ -119,6 +124,7 @@ export default async function JournalPage({ searchParams }: { searchParams: Sear
         years={knownYears}
         year={year}
         hasPeriods={periods.length > 0}
+        topicSuggestions={topicSuggestions}
         lessons={data.lessons.map((lesson) => ({
           id: lesson.id,
           date: lesson.date.toISOString(),

@@ -23,9 +23,13 @@ export default async function YearPage({ searchParams }: { searchParams: SearchP
   const periods = await getQuarterPeriods(year);
 
   // Предлагаем на выбор известные годы плюс соседние — чтобы можно было завести следующий.
+  //
+  // ВЫБРАННЫЙ год обязан быть в списке всегда, даже если он ещё никому не известен
+  // и выходит за пятилетнее окно: иначе <select> не найдёт совпадения со своим
+  // value и покажет первый пункт — выбираешь 2027/2028, а видишь 2028/2029.
   const current = academicYearOf();
-  const options = [...new Set([...knownYears, current, current + 1, year - 1, year + 1])]
-    .filter((item) => item >= current - 5 && item <= current + 5)
+  const options = [...new Set([...knownYears, current, current + 1, year - 1, year, year + 1])]
+    .filter((item) => item === year || (item >= current - 5 && item <= current + 5))
     .sort((a, b) => b - a);
 
   return (

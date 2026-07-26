@@ -131,13 +131,13 @@ export default async function LoginPage() {
 
           <h2 className="hidden text-xl font-bold tracking-tight lg:block">Вход в журнал</h2>
           <p className="mb-7 mt-1 hidden text-sm text-muted-foreground lg:block">
-            Логин и пароль выдаёт администратор школы.
+            Логин и пароль выдаёт администратор.
           </p>
 
           <LoginForm />
 
           <p className="mt-6 border-t border-rule pt-5 text-[13px] leading-relaxed text-muted-foreground">
-            Логин и пароль выдаёт администратор школы. Если пароль забыт — обратитесь
+            Логин и пароль выдаёт администратор. Если пароль забыт — обратитесь
             к нему: восстановить старый пароль нельзя, но можно выдать новый.
           </p>
         </div>

@@ -139,10 +139,13 @@ export default async function JournalPage({ searchParams }: { searchParams: Sear
       <JournalGrid
         canEdit={GRADE_EDITOR_ROLES.includes(user.role)}
         quarter={quarter}
+        subjectName={subjectName}
         lessons={data.lessons.map((lesson) => ({
           id: lesson.id,
           date: lesson.date.toISOString(),
           topic: lesson.topic,
+          homework: lesson.homework,
+          plannedKind: lesson.plannedKind,
         }))}
         rows={data.rows.map((row) => ({
           studentId: row.student.id,

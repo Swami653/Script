@@ -15,12 +15,26 @@ import {
   MIN_GRADE,
   type GradeKind,
 } from "@/lib/grades";
-import { cn, formatDateShort, pluralize } from "@/lib/utils";
+import { cn, formatDateShort, pluralize, todayUtcMidnight } from "@/lib/utils";
 
 export type BulkLesson = { id: string; date: string; topic: string | null };
 export type BulkStudent = { id: string; name: string };
 
 const GRADE_BUTTONS = Array.from({ length: MAX_GRADE }, (_, index) => index + MIN_GRADE);
+
+/**
+ * Урок по умолчанию — последний ПРОШЕДШИЙ (date <= сегодня UTC): после
+ * генерации «Сетки на четверть» последний урок списка — будущий, а оценки
+ * обычно ставят за сегодняшний. Прошедших нет — последний в списке.
+ */
+function defaultLessonId(lessons: BulkLesson[]): string {
+  const todayMs = todayUtcMidnight().getTime();
+  let last: BulkLesson | undefined;
+  for (const lesson of lessons) {
+    if (new Date(lesson.date).getTime() <= todayMs) last = lesson;
+  }
+  return (last ?? lessons[lessons.length - 1])?.id ?? "";
+}
 
 /**
  * Панель «Выставить всему классу»: выбор урока и типа работы, общая оценка
@@ -39,8 +53,8 @@ export function BulkGradePanel({
   onError: (message: string) => void;
 }) {
   const [pending, startTransition] = useTransition();
-  // По умолчанию — последний урок четверти: обычно оценки ставят за него.
-  const [lessonId, setLessonId] = useState(() => lessons[lessons.length - 1]?.id ?? "");
+  // По умолчанию — последний прошедший урок четверти: обычно оценки ставят за него.
+  const [lessonId, setLessonId] = useState(() => defaultLessonId(lessons));
   const [kind, setKind] = useState<GradeKind>("regular");
   /** studentId -> оценка; отсутствие ключа = «не ставить». */
   const [values, setValues] = useState<Record<string, number>>({});
@@ -52,7 +66,7 @@ export function BulkGradePanel({
    */
   const selectedLesson = lessons.some((lesson) => lesson.id === lessonId)
     ? lessonId
-    : (lessons[lessons.length - 1]?.id ?? "");
+    : defaultLessonId(lessons);
 
   /** Список длиннее серверного лимита — выставить всем разом нельзя. */
   const tooManyStudents = students.length > MAX_BULK_GRADES;

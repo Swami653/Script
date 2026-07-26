@@ -1,11 +1,13 @@
 "use client";
 
-import { Eraser, ExternalLink, Trash2, UserX } from "lucide-react";
+import { BarChart3, ClipboardCheck, Eraser, ExternalLink, Trash2, UserX } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState, useTransition } from "react";
 import { createPortal } from "react-dom";
 
+import { AttendanceSheet } from "@/app/(app)/journal/attendance-sheet";
+import { LessonInsight } from "@/app/(app)/journal/lesson-insight";
 import { Flash, useFlash } from "@/components/flash";
 import { Button } from "@/components/ui/button";
 import {
@@ -17,6 +19,7 @@ import {
 } from "@/lib/actions/grades";
 import { deleteLessonAction } from "@/lib/actions/lessons";
 import {
+  analyzeLessonColumn,
   averageColorClasses,
   averageGrade,
   formatAverage,
@@ -32,12 +35,24 @@ import {
   type GradeKind,
   type Quarter,
 } from "@/lib/grades";
-import { cn, formatDateLong, formatDateShort } from "@/lib/utils";
+import { cn, formatDateLong, formatDateShort, todayUtcMidnight } from "@/lib/utils";
 
 export type GridLesson = {
   id: string;
   date: string;
   topic: string | null;
+  /** «Что задано» к этому уроку. null — не записано. */
+  homework: string | null;
+  /** Пометка планируемой работы — сырой TEXT; сравнивается с "control" защитно. */
+  plannedKind: string | null;
+};
+
+/** Панель урока: анализ/домашка/пометка (insight) или перекличка (attendance). */
+type LessonPanelState = {
+  type: "insight" | "attendance";
+  lessonId: string;
+  /** Координаты якоря у столбца (десктоп) или null — нижний лист (телефон). */
+  origin: { x: number; y: number } | null;
 };
 
 /** Одна оценка в клетке: значение + тип/вес/комментарий. */
@@ -68,8 +83,8 @@ function makeGrade(value: number, kind: GradeKind): GridGrade {
   return { value, weight: weightForKind(kind), kind, comment: null };
 }
 
-/** «Иванова Мария Петровна» -> «Иванова М. П.» — для узких экранов. */
-function shortName(name: string): string {
+/** «Иванова Мария Петровна» -> «Иванова М. П.» — для узких экранов и панелей. */
+export function shortName(name: string): string {
   const [surname, ...rest] = name.trim().split(/\s+/);
   if (!surname) return name;
   const initials = rest
@@ -97,11 +112,13 @@ export function JournalGrid({
   rows,
   quarter,
   canEdit,
+  subjectName,
 }: {
   lessons: GridLesson[];
   rows: GridRow[];
   quarter: Quarter;
   canEdit: boolean;
+  subjectName: string;
 }) {
   const router = useRouter();
   const { flash, show, clear } = useFlash();
@@ -115,9 +132,17 @@ export function JournalGrid({
   const [picker, setPicker] = useState<{ row: number; col: number; x: number; y: number } | null>(
     null,
   );
+  /**
+   * Открытая панель урока. Хранится lessonId, а не индекс столбца: после
+   * refresh, смены четверти или удаления урока панель сама находит свой
+   * столбец заново, а если урока больше нет — не рендерится.
+   */
+  const [lessonPanel, setLessonPanel] = useState<LessonPanelState | null>(null);
   const [settled, setSettled] = useState<Record<string, number>>({});
   const pendingOne = useRef<ReturnType<typeof setTimeout> | null>(null);
   const gridRef = useRef<HTMLDivElement>(null);
+  /** Автоскролл к «сегодня» — один раз при монтировании. */
+  const scrolledToToday = useRef(false);
 
   useEffect(() => {
     setOverrides({});
@@ -125,6 +150,22 @@ export function JournalGrid({
   }, [rows, lessons]);
 
   useEffect(() => () => void (pendingOne.current && clearTimeout(pendingOne.current)), []);
+
+  /**
+   * После генерации «Сетки на четверть» уроков много и последние — будущие:
+   * журнал открывается прокрученным к сегодняшнему столбцу (первый с
+   * date >= сегодня UTC; если все прошли — последний). Однократно.
+   */
+  useEffect(() => {
+    if (scrolledToToday.current || lessons.length === 0) return;
+    scrolledToToday.current = true;
+    const todayMs = todayUtcMidnight().getTime();
+    let target = lessons.findIndex((lesson) => new Date(lesson.date).getTime() >= todayMs);
+    if (target === -1) target = lessons.length - 1;
+    gridRef.current
+      ?.querySelector(`[data-lesson-col="${target}"]`)
+      ?.scrollIntoView({ inline: "center", block: "nearest" });
+  }, [lessons]);
 
   const gradesAt = useCallback(
     (rowIndex: number, colIndex: number): GridGrade[] => {
@@ -464,8 +505,54 @@ export function JournalGrid({
     if (!canEdit) return;
     const rect = event.currentTarget.getBoundingClientRect();
     setSelected({ row, col });
+    // Панель урока и окно оценки не живут одновременно — открытие закрывает другое.
+    setLessonPanel(null);
     setPicker({ row, col, x: rect.left + rect.width / 2, y: rect.bottom + 6 });
   }
+
+  /** Открыть панель урока от элемента шапки (десктоп): якорь — под элементом. */
+  function openLessonPanel(
+    event: React.MouseEvent<HTMLElement>,
+    type: "insight" | "attendance",
+    lessonId: string,
+  ) {
+    const rect = event.currentTarget.getBoundingClientRect();
+    setPicker(null);
+    setLessonPanel({
+      type,
+      lessonId,
+      origin: { x: rect.left + rect.width / 2, y: rect.bottom + 6 },
+    });
+  }
+
+  /** Открыть панель урока нижним листом (телефон). */
+  const openMobilePanel = useCallback((type: "insight" | "attendance", lessonId: string) => {
+    setPicker(null);
+    setLessonPanel({ type, lessonId, origin: null });
+  }, []);
+
+  const closeLessonPanel = useCallback(() => setLessonPanel(null), []);
+
+  /** Столбец открытой панели; -1 — урок пропал (удалён/сменилась четверть). */
+  const panelColIndex = lessonPanel
+    ? lessons.findIndex((lesson) => lesson.id === lessonPanel.lessonId)
+    : -1;
+  const panelLesson = panelColIndex >= 0 ? lessons[panelColIndex] : undefined;
+
+  /** Анализ столбца для панели — по live-данным (видит оптимистичные оценки). */
+  const panelAnalysis = useMemo(
+    () =>
+      lessonPanel?.type === "insight" && panelColIndex >= 0
+        ? analyzeLessonColumn(
+            rows.map((row, rowIndex) => ({
+              name: row.name,
+              grades: gradesAt(rowIndex, panelColIndex),
+              absent: isAbsent(rowIndex, panelColIndex),
+            })),
+          )
+        : null,
+    [lessonPanel, panelColIndex, rows, gradesAt, isAbsent],
+  );
 
   const activeCell = selected ?? { row: 0, col: 0 };
 
@@ -508,6 +595,7 @@ export function JournalGrid({
                 <th
                   key={lesson.id}
                   scope="col"
+                  data-lesson-col={index}
                   className={cn(
                     "group w-[4.25rem] border-b-2 border-rule-strong px-0 py-1.5 align-bottom font-medium",
                     index > 0 &&
@@ -515,11 +603,42 @@ export function JournalGrid({
                         new Date(lessons[index - 1]!.date).getUTCMonth() &&
                       "border-l border-l-rule-strong",
                   )}
-                  title={`${formatDateLong(lesson.date)}${lesson.topic ? ` — ${lesson.topic}` : ""}`}
                 >
                   <div className="flex flex-col items-center gap-0.5">
-                    <span className="text-[13px] tabular-nums">{formatDateShort(lesson.date)}</span>
-                    {canEdit && <DeleteLessonButton lessonId={lesson.id} onError={show} />}
+                    {/* Дата — кнопка: открывает панель урока (анализ + домашка + КР) */}
+                    <button
+                      type="button"
+                      onClick={(event) => openLessonPanel(event, "insight", lesson.id)}
+                      title={`${formatDateLong(lesson.date)}${lesson.topic ? ` — ${lesson.topic}` : ""}${
+                        lesson.homework ? ` — задано: ${lesson.homework}` : ""
+                      }`}
+                      className="focus-ring rounded px-1 text-[13px] tabular-nums transition-colors hover:bg-accent"
+                    >
+                      {formatDateShort(lesson.date)}
+                    </button>
+                    {/* Ряд под датой: постоянный штамп «КР» + hover-иконки.
+                        Высота фиксированная, чтобы даты всех столбцов стояли в линию */}
+                    <div className="flex h-4 items-center justify-center gap-1">
+                      {lesson.plannedKind === "control" && (
+                        <span
+                          className="text-[9px] font-semibold uppercase leading-none tracking-wide text-muted-foreground"
+                          title="Планируется контрольная"
+                        >
+                          КР
+                        </span>
+                      )}
+                      {canEdit && (
+                        <button
+                          type="button"
+                          onClick={(event) => openLessonPanel(event, "attendance", lesson.id)}
+                          title="Перекличка — отметить отсутствующих"
+                          className="focus-ring flex h-4 w-4 items-center justify-center rounded opacity-0 transition-opacity focus-visible:opacity-100 group-hover:opacity-100"
+                        >
+                          <ClipboardCheck className="h-3 w-3 text-muted-foreground" aria-hidden />
+                        </button>
+                      )}
+                      {canEdit && <DeleteLessonButton lessonId={lesson.id} onError={show} />}
+                    </div>
                   </div>
                 </th>
               ))}
@@ -680,7 +799,38 @@ export function JournalGrid({
         onRemove={(r, c, slot) => removeGrade(r, c, slot)}
         onAbsent={(r, c) => markAbsent(r, c)}
         onClearAbsent={(r, c) => clearAbsent(r, c)}
+        onOpenPanel={openMobilePanel}
       />
+
+      {/* ── Панели урока: перекличка и анализ/домашка/пометка КР ──────────── */}
+      {lessonPanel?.type === "attendance" && panelLesson && canEdit && (
+        <AttendanceSheet
+          /* key — чтобы при смене урока подтверждения начинались заново */
+          key={`attendance-${panelLesson.id}`}
+          lesson={panelLesson}
+          col={panelColIndex}
+          rows={rows}
+          origin={lessonPanel.origin}
+          gradesAt={gradesAt}
+          isAbsent={isAbsent}
+          onMarkAbsent={markAbsent}
+          onClearAbsent={clearAbsent}
+          onClose={closeLessonPanel}
+        />
+      )}
+      {lessonPanel?.type === "insight" && panelLesson && panelAnalysis && (
+        <LessonInsight
+          /* key — чтобы черновик домашки не переезжал на другой урок */
+          key={`insight-${panelLesson.id}`}
+          lesson={panelLesson}
+          subjectName={subjectName}
+          canEdit={canEdit}
+          origin={lessonPanel.origin}
+          analysis={panelAnalysis}
+          onFlash={show}
+          onClose={closeLessonPanel}
+        />
+      )}
 
       {picker && canEdit && (
         <GradePicker
@@ -772,6 +922,20 @@ function CellContent({
   );
 }
 
+/**
+ * Урок по умолчанию — последний ПРОШЕДШИЙ (date <= сегодня UTC): после
+ * генерации «Сетки на четверть» последний урок списка — будущий, а оценки
+ * ставят за сегодняшний. Прошедших нет — последний в списке.
+ */
+function lastPastLessonIndex(lessons: GridLesson[]): number {
+  const todayMs = todayUtcMidnight().getTime();
+  let last = -1;
+  for (let index = 0; index < lessons.length; index += 1) {
+    if (new Date(lessons[index]!.date).getTime() <= todayMs) last = index;
+  }
+  return last >= 0 ? last : Math.max(0, lessons.length - 1);
+}
+
 function MobileLessonBoard({
   lessons,
   rows,
@@ -784,6 +948,7 @@ function MobileLessonBoard({
   onRemove,
   onAbsent,
   onClearAbsent,
+  onOpenPanel,
 }: {
   lessons: GridLesson[];
   rows: GridRow[];
@@ -796,8 +961,9 @@ function MobileLessonBoard({
   onRemove: (row: number, col: number, slot: number) => void;
   onAbsent: (row: number, col: number) => void;
   onClearAbsent: (row: number, col: number) => void;
+  onOpenPanel: (type: "insight" | "attendance", lessonId: string) => void;
 }) {
-  const [colIndex, setColIndex] = useState(() => Math.max(0, lessons.length - 1));
+  const [colIndex, setColIndex] = useState(() => lastPastLessonIndex(lessons));
   const [openRow, setOpenRow] = useState<number | null>(null);
   const [kind, setKind] = useState<GradeKind>("regular");
   const [comment, setComment] = useState("");
@@ -838,6 +1004,31 @@ function MobileLessonBoard({
             </option>
           ))}
         </select>
+
+        {/* Действия урока: перекличка и анализ — открываются нижними листами */}
+        <div className="mt-2 grid grid-cols-2 gap-2">
+          {canEdit && (
+            <button
+              type="button"
+              onClick={() => onOpenPanel("attendance", lesson.id)}
+              className="focus-ring flex h-11 items-center justify-center gap-1.5 rounded-md border border-input bg-card text-sm font-medium transition-colors hover:bg-accent"
+            >
+              <ClipboardCheck className="h-4 w-4 text-muted-foreground" aria-hidden />
+              Перекличка
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => onOpenPanel("insight", lesson.id)}
+            className={cn(
+              "focus-ring flex h-11 items-center justify-center gap-1.5 rounded-md border border-input bg-card text-sm font-medium transition-colors hover:bg-accent",
+              !canEdit && "col-span-2",
+            )}
+          >
+            <BarChart3 className="h-4 w-4 text-muted-foreground" aria-hidden />
+            Анализ урока
+          </button>
+        </div>
       </div>
 
       <ul className="divide-y divide-rule overflow-hidden rounded-lg border border-rule-strong bg-card">

@@ -13,7 +13,9 @@
     "db:seed": "prisma db seed",
     "db:reset": "prisma migrate reset --force --skip-generate",
     "db:studio": "prisma studio",
-    "setup": "prisma generate && prisma db push && prisma db seed"
+    "setup": "prisma generate && prisma migrate deploy && prisma db seed",
+    "vercel-build": "prisma generate && prisma migrate deploy && tsx prisma/seed-if-empty.ts && next build",
+    "db:deploy": "prisma migrate deploy"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"

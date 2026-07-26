@@ -3,8 +3,9 @@
 // ВАЖНЫЕ ПРАВИЛА ПРЕДМЕТНОЙ ОБЛАСТИ (см. CLAUDE.md):
 //  * Оценка (Grade.value) — ЦЕЛОЕ число строго от 1 до 10 (10-балльная система).
 //  * Учебный год состоит из 4 четвертей: Lesson.quarter / Grade.quarter ∈ {1,2,3,4}.
-//  * SQLite не поддерживает enum в Prisma, поэтому роль хранится строкой,
-//    а допустимые значения описаны типом Role в src/lib/roles.ts ("ADMIN" | "TEACHER" | "STUDENT").
+//  * Роль хранится строкой, а допустимые значения описаны типом Role
+//    в src/lib/roles.ts ("ADMIN" | "TEACHER" | "STUDENT"): так схема остаётся
+//    совместимой и с SQLite (локальная разработка), и с PostgreSQL.
 
 generator client {
   provider = "prisma-client-js"
@@ -13,8 +14,11 @@ generator client {
 }
 
 datasource db {
-  provider = "sqlite"
+  provider = "postgresql"
+  // Пулированное соединение Neon — его использует приложение в рантайме.
   url      = env("DATABASE_URL")
+  // Прямое соединение без pgbouncer — нужно миграциям (prisma migrate / db push).
+  directUrl = env("DIRECT_URL")
 }
 
 /// Пользователь системы: администратор, учитель или ученик.

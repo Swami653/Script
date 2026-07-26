@@ -18,17 +18,19 @@
 
 ## Стек
 
-Next.js 15 (App Router) · TypeScript · Tailwind CSS · Prisma + SQLite ·
+Next.js 15 (App Router) · TypeScript · Tailwind CSS · Prisma + PostgreSQL ·
 NextAuth.js v5 (Credentials + bcrypt) · Zod · Lucide Icons
 
 ## Запуск
 
 ```bash
 npm install
-cp .env.example .env      # и подставьте свой AUTH_SECRET
-npm run setup             # prisma generate + db push + seed
+cp .env.example .env      # подставьте DATABASE_URL, DIRECT_URL и AUTH_SECRET
+npm run setup             # prisma generate + миграции + demo-данные
 npm run dev               # http://localhost:3000
 ```
+
+Нужна доступная база PostgreSQL: локальная, в Docker или отдельная ветка Neon.
 
 Демо-аккаунты после `npm run setup`:
 
@@ -74,40 +76,32 @@ npm run dev               # http://localhost:3000
 
 ## Развёртывание
 
-### Демо-стенд (Vercel, без внешней БД)
+Приложение работает на PostgreSQL (проверено на Neon + Vercel).
 
-Проект разворачивается на Vercel как есть, но SQLite там живёт только в `/tmp`:
-файловая система serverless-функции доступна на запись лишь во временной папке.
-Поэтому включается **демо-режим** — при первом обращении экземпляр функции сам
-создаёт схему и заливает демо-данные (`src/lib/demo-bootstrap.ts`).
+1. Подключите базу — например, интеграцию **Neon** в панели Vercel.
+2. Задайте переменные окружения проекта:
 
-```bash
-vercel link --project school-journal
-vercel env add DATABASE_URL     # file:/tmp/journal-demo.db
-vercel env add DEMO_MODE        # true
-vercel env add AUTH_SECRET      # openssl rand -base64 32
-vercel env add AUTH_TRUST_HOST  # true
-vercel deploy --prod
+   | Переменная | Значение |
+   |---|---|
+   | `DATABASE_URL` | пулированная строка (`...-pooler...`) **с** `pgbouncer=true&connection_limit=1` |
+   | `DIRECT_URL` | прямая строка без pgbouncer — для миграций |
+   | `AUTH_SECRET` | `openssl rand -base64 32` |
+   | `AUTH_TRUST_HOST` | `true` |
+
+3. Разверните: `vercel deploy --prod`.
+
+Сборка на Vercel идёт по скрипту `vercel-build`:
+
+```
+prisma generate && prisma migrate deploy && tsx prisma/seed-if-empty.ts && next build
 ```
 
-Ограничения демо-режима, о которых нужно помнить:
+Миграции применяются автоматически, а сид срабатывает **только если база пустая**,
+поэтому повторные деплои не трогают накопленные оценки.
 
-- у каждого экземпляра функции своя копия базы, поэтому изменения не общие;
-- при перезапуске экземпляра данные возвращаются к исходным;
-- id демо-записей фиксированы (`demo-student-1`, `demo-lesson-1-1-1`, …) —
-  иначе ссылки со страницы, отданной одним экземпляром, ломались бы при записи
-  в другой.
-
-Это витрина «посмотреть и потыкать», а не рабочая установка.
-
-### Рабочая установка (PostgreSQL)
-
-1. В `prisma/schema.prisma` замените `provider = "sqlite"` на `"postgresql"`.
-2. Задайте `DATABASE_URL` строкой подключения (Neon, Supabase, свой сервер).
-3. Уберите `DEMO_MODE` — бутстрап и демо-данные отключатся сами.
-4. `npx prisma migrate deploy` — и приложение готово к настоящей работе.
-
-Кода менять не нужно: запросы, расчёты и проверки прав от СУБД не зависят.
+Почему две строки подключения: serverless-функции живут коротко и плодят
+соединения, поэтому приложение ходит через пул (pgbouncer), а миграциям нужен
+прямой канал — pgbouncer не поддерживает часть команд DDL-сессии.
 
 **Не кладите `.env` в загрузку.** Файл `.vercelignore` заменяет `.gitignore`
 при выгрузке на Vercel, поэтому локальные секреты перечислены в нём явно.
@@ -119,6 +113,7 @@ npm run dev        # разработка
 npm run build      # прод-сборка
 npm run start      # запуск собранного приложения
 npm run typecheck  # проверка типов
-npm run db:seed    # перезалить демо-данные
+npm run db:seed    # перезалить демо-данные (очищает таблицы!)
+npm run db:deploy  # применить миграции (prisma migrate deploy)
 npm run db:studio  # Prisma Studio
 ```

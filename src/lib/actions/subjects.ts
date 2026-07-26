@@ -24,7 +24,7 @@ export async function createSubjectAction(input: {
     const name = subjectNameSchema.parse(input.name);
 
     const existing = await prisma.subject.findFirst({
-      where: { name: { equals: name } },
+      where: { name: { equals: name, mode: "insensitive" } },
       select: { id: true },
     });
     if (existing) return actionFail(`Предмет «${name}» уже существует`, 409);
@@ -58,7 +58,7 @@ export async function renameSubjectAction(input: {
     if (!subject) return actionFail("Предмет не найден", 404);
 
     const duplicate = await prisma.subject.findFirst({
-      where: { name: { equals: name }, NOT: { id: subjectId } },
+      where: { name: { equals: name, mode: "insensitive" }, NOT: { id: subjectId } },
       select: { id: true },
     });
     if (duplicate) return actionFail(`Предмет «${name}» уже существует`, 409);

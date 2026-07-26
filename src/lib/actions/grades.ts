@@ -197,6 +197,125 @@ export async function setGradeAction(input: {
   }
 }
 
+const bulkEntrySchema = z.object({
+  studentId: z.string().min(1, "Не указан ученик"),
+  value: gradeValueSchema,
+});
+
+const setGradesBulkSchema = z.object({
+  lessonId: z.string().min(1, "Не указан урок"),
+  kind: gradeKindSchema.default("regular"),
+  entries: z
+    .array(bulkEntrySchema)
+    .min(1, "Не выбрано ни одной оценки")
+    .max(100, "За один раз можно выставить не более 100 оценок"),
+});
+
+/**
+ * Массовое выставление: оценка каждому ученику из списка за один урок.
+ * Оценка встаёт в первую позицию клетки (slot 0), заменяя уже стоящую;
+ * отметка «Н» у затронутых учеников снимается. Комментарии существующих
+ * оценок не трогаются. В журнал изменений уходит одна сводная запись.
+ */
+export async function setGradesBulkAction(input: {
+  lessonId: string;
+  kind?: unknown;
+  entries: { studentId: string; value: unknown }[];
+}): Promise<ActionResult<{ count: number }>> {
+  try {
+    const teacher = await requireRole(GRADE_EDITOR_ROLES);
+
+    const parsed = setGradesBulkSchema.parse({
+      lessonId: input.lessonId,
+      kind: typeof input.kind === "string" ? input.kind : "regular",
+      entries: Array.isArray(input.entries)
+        ? input.entries.map((entry) => ({
+            studentId: entry?.studentId,
+            value: normalizeNumberInput(entry?.value),
+          }))
+        : input.entries,
+    });
+
+    // Повторы одного ученика схлопываем — последняя оценка в списке выигрывает.
+    const byStudent = new Map<string, number>();
+    for (const entry of parsed.entries) byStudent.set(entry.studentId, entry.value);
+    const studentIds = [...byStudent.keys()];
+
+    const kind = asGradeKind(parsed.kind);
+    const weight = weightForKind(kind);
+
+    // Урок и ВСЕ ученики проверяются в БД: оценку нельзя выставить ни на чужой
+    // (несуществующий) id, ни пользователю с ролью учителя или администратора.
+    const [lesson, students] = await Promise.all([
+      prisma.lesson.findUnique({ where: { id: parsed.lessonId }, select: LESSON_FOR_GRADE }),
+      prisma.user.findMany({
+        where: { id: { in: studentIds }, role: "STUDENT" },
+        select: { id: true },
+      }),
+    ]);
+    if (!lesson) return actionFail("Урок не найден", 404);
+    if (lesson.deletedAt) return actionFail("Урок в корзине — сначала восстановите его", 409);
+    if (students.length !== studentIds.length) {
+      return actionFail("Часть учеников не найдена или не является учениками", 400);
+    }
+
+    // Одна транзакция на весь список: либо оценки получают все, либо никто.
+    await prisma.$transaction([
+      ...studentIds.map((studentId) =>
+        prisma.grade.upsert({
+          where: {
+            studentId_lessonId_slot: { studentId, lessonId: lesson.id, slot: 0 },
+          },
+          create: {
+            value: byStudent.get(studentId)!,
+            slot: 0,
+            kind,
+            weight,
+            studentId,
+            lessonId: lesson.id,
+            // Денормализованные поля берём ТОЛЬКО из урока — инвариант схемы.
+            subjectId: lesson.subjectId,
+            quarter: lesson.quarter,
+            year: lesson.year,
+            teacherId: teacher.id,
+          },
+          update: {
+            value: byStudent.get(studentId)!,
+            kind,
+            weight,
+            subjectId: lesson.subjectId,
+            quarter: lesson.quarter,
+            year: lesson.year,
+            teacherId: teacher.id,
+          },
+        }),
+      ),
+      // Оценка и «Н» взаимоисключающи — снимаем отметки у затронутых.
+      prisma.absence.deleteMany({
+        where: { lessonId: lesson.id, studentId: { in: studentIds } },
+      }),
+    ]);
+
+    const count = studentIds.length;
+    await logAudit({
+      actor: teacher,
+      action: "grades.bulk",
+      subjectName: lesson.subject.name,
+      details:
+        `${lessonRef(lesson.subject.name, lesson.date)}: выставлено ${count} ` +
+        `${pluralize(count, "оценка", "оценки", "оценок")} ` +
+        `(${GRADE_KINDS[kind].label.toLowerCase()})`,
+    });
+
+    revalidatePath("/journal");
+    revalidatePath("/student");
+
+    return actionOk({ count }, `Выставлено оценок: ${count}`);
+  } catch (error) {
+    return actionError(error);
+  }
+}
+
 /**
  * Удалить оценку из позиции клетки. Если удаляется первая из двух,
  * вторая занимает её место — в клетке не остаётся «дырок».

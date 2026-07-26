@@ -119,6 +119,15 @@ export default async function JournalPage({ searchParams }: { searchParams: Sear
         years={knownYears}
         year={year}
         hasPeriods={periods.length > 0}
+        lessons={data.lessons.map((lesson) => ({
+          id: lesson.id,
+          date: lesson.date.toISOString(),
+          topic: lesson.topic,
+        }))}
+        students={data.rows.map((row) => ({
+          id: row.student.id,
+          name: row.student.name,
+        }))}
       />
 
       <JournalGrid

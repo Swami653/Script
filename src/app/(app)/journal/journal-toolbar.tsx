@@ -1,10 +1,15 @@
 "use client";
 
-import { CalendarPlus, Download, Keyboard, X } from "lucide-react";
+import { CalendarPlus, Download, Keyboard, Users, X } from "lucide-react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useState, useTransition } from "react";
 
+import {
+  BulkGradePanel,
+  type BulkLesson,
+  type BulkStudent,
+} from "@/app/(app)/journal/bulk-grade-panel";
 import { Flash, useFlash } from "@/components/flash";
 import { Button } from "@/components/ui/button";
 import { FieldHint, Input, Label, Select } from "@/components/ui/field";
@@ -21,6 +26,8 @@ export function JournalToolbar({
   years,
   year,
   hasPeriods,
+  lessons,
+  students,
 }: {
   subjects: { id: string; name: string }[];
   subjectId: string;
@@ -30,11 +37,16 @@ export function JournalToolbar({
   years: number[];
   year: number;
   hasPeriods: boolean;
+  /** Уроки выбранной четверти — для панели массового выставления. */
+  lessons: BulkLesson[];
+  /** Ученики журнала (с учётом фильтра по классу). */
+  students: BulkStudent[];
 }) {
   const router = useRouter();
   const searchParams = useSearchParams();
   const { flash, show, clear } = useFlash();
   const [addOpen, setAddOpen] = useState(false);
+  const [bulkOpen, setBulkOpen] = useState(false);
 
   function navigate(patch: Record<string, string | null>) {
     const params = new URLSearchParams(searchParams.toString());
@@ -135,7 +147,31 @@ export function JournalToolbar({
             <Download className="h-4 w-4" aria-hidden />
             <span className="hidden sm:inline">Экспорт</span>
           </a>
-          <Button onClick={() => setAddOpen((value) => !value)}>
+          {lessons.length > 0 && students.length > 0 && (
+            <Button
+              variant="outline"
+              onClick={() => {
+                setBulkOpen((value) => !value);
+                setAddOpen(false);
+              }}
+              title="Выставить оценку всем ученикам за один урок"
+            >
+              {bulkOpen ? (
+                <X className="h-4 w-4" aria-hidden />
+              ) : (
+                <Users className="h-4 w-4" aria-hidden />
+              )}
+              <span className="hidden sm:inline">
+                {bulkOpen ? "Отмена" : "Выставить всему классу"}
+              </span>
+            </Button>
+          )}
+          <Button
+            onClick={() => {
+              setAddOpen((value) => !value);
+              setBulkOpen(false);
+            }}
+          >
             {addOpen ? (
               <X className="h-4 w-4" aria-hidden />
             ) : (
@@ -153,6 +189,21 @@ export function JournalToolbar({
           hasPeriods={hasPeriods}
           onDone={(message) => {
             setAddOpen(false);
+            show("success", message);
+            router.refresh();
+          }}
+          onError={(message) => show("error", message)}
+        />
+      )}
+
+      {bulkOpen && (
+        <BulkGradePanel
+          /* key — чтобы при смене урока/четверти панель начиналась с чистого выбора */
+          key={`${subjectId}-${quarter}-${year}-${className ?? ""}`}
+          lessons={lessons}
+          students={students}
+          onDone={(message) => {
+            setBulkOpen(false);
             show("success", message);
             router.refresh();
           }}

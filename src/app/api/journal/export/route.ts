@@ -84,7 +84,13 @@ export async function GET(request: NextRequest) {
           .join("/");
       }),
       formatAverage(row.average),
-      ...(finals ? [finals.get(row.student.id) ?? "н/а"] : []),
+      /* «н/а» — только тем, кто в ведомости ЕСТЬ, но без отметки. Кого в снимке
+         нет вовсе (предмет не изучает либо заведён после закрытия) — пустая
+         клетка: печатный документ не должен утверждать, что ученик не
+         аттестован по предмету, которого у него не было. */
+      ...(finals
+        ? [finals.has(row.student.id) ? (finals.get(row.student.id) ?? "н/а") : ""]
+        : []),
       row.year ?? "",
     ]);
 

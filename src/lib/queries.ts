@@ -1,3 +1,4 @@
+import type { AuditAction } from "@/lib/audit-actions";
 import { ForbiddenError, type SessionUser } from "@/lib/auth-guards";
 import {
   asGradeKind,
@@ -15,10 +16,18 @@ import { prisma } from "@/lib/prisma";
  * уже выполнила requirePageRole()/requireRole(); там, где данные принадлежат
  * конкретному ученику, дополнительно проверяется владелец.
  *
- * Средний балл за четверть — ВЗВЕШЕННЫЙ (контрольная весит больше, см. grades.ts).
+ * Средний балл за четверть — обычное среднее арифметическое (см. grades.ts).
  * Отметка «Н» (Absence) в средний балл не входит — это учёт посещаемости.
  * Всё ограничено учебным годом: 2025/2026 и 2027/2028 не смешиваются.
+ *
+ * Уроки из корзины (Lesson.deletedAt != null) НЕ показываются нигде: ни в
+ * журнале, ни в отчётах, ни в экспорте — их оценки и «Н» тоже выпадают из
+ * всех подсчётов до восстановления урока. Отсюда фильтры deletedAt: null
+ * (для Grade/Absence — через связь lesson) в каждом запросе ниже.
  */
+
+/** Фильтр «только живые уроки» для запросов по оценкам и отметкам «Н». */
+const LIVE_LESSON = { deletedAt: null } as const;
 
 export type JournalLesson = {
   id: string;
@@ -67,7 +76,12 @@ export async function getSubjects() {
       id: true,
       name: true,
       createdAt: true,
-      _count: { select: { lessons: true, grades: true } },
+      _count: {
+        select: {
+          lessons: { where: LIVE_LESSON },
+          grades: { where: { lesson: LIVE_LESSON } },
+        },
+      },
     },
   });
 }
@@ -84,7 +98,7 @@ export async function getStudents(className?: string | null) {
 export async function getQuartersWithLessons(subjectId: string, year: number): Promise<number[]> {
   const rows = await prisma.lesson.groupBy({
     by: ["quarter"],
-    where: { subjectId, year },
+    where: { subjectId, year, ...LIVE_LESSON },
     _count: { _all: true },
   });
   return rows.map((row) => row.quarter).sort((a, b) => a - b);
@@ -110,13 +124,13 @@ export async function getJournalData(
 ): Promise<JournalData> {
   const [lessons, students, gradesOfQuarter, gradesOfYear, absencesOfQuarter] = await Promise.all([
     prisma.lesson.findMany({
-      where: { subjectId, quarter, year },
+      where: { subjectId, quarter, year, ...LIVE_LESSON },
       orderBy: { date: "asc" },
       select: { id: true, date: true, quarter: true, topic: true },
     }),
     getStudents(className),
     prisma.grade.findMany({
-      where: { subjectId, quarter, year },
+      where: { subjectId, quarter, year, lesson: LIVE_LESSON },
       orderBy: { slot: "asc" },
       select: {
         id: true,
@@ -130,11 +144,11 @@ export async function getJournalData(
       },
     }),
     prisma.grade.findMany({
-      where: { subjectId, year },
+      where: { subjectId, year, lesson: LIVE_LESSON },
       select: { value: true, weight: true, studentId: true, quarter: true },
     }),
     prisma.absence.findMany({
-      where: { subjectId, quarter, year },
+      where: { subjectId, quarter, year, lesson: LIVE_LESSON },
       select: { studentId: true, lessonId: true },
     }),
   ]);
@@ -244,12 +258,12 @@ export async function getStudentReport(
   const [subjects, grades, absences] = await Promise.all([
     prisma.subject.findMany({ orderBy: { name: "asc" }, select: { id: true, name: true } }),
     prisma.grade.findMany({
-      where: { studentId, year },
+      where: { studentId, year, lesson: LIVE_LESSON },
       select: { value: true, weight: true, quarter: true, subjectId: true },
     }),
     prisma.absence.groupBy({
       by: ["subjectId"],
-      where: { studentId, year },
+      where: { studentId, year, lesson: LIVE_LESSON },
       _count: { _all: true },
     }),
   ]);
@@ -342,17 +356,17 @@ export async function getStudentSubjectDetail(
 
   const [lessons, grades, absences] = await Promise.all([
     prisma.lesson.findMany({
-      where: { subjectId, year },
+      where: { subjectId, year, ...LIVE_LESSON },
       orderBy: { date: "asc" },
       select: { id: true, date: true, quarter: true, topic: true },
     }),
     prisma.grade.findMany({
-      where: { studentId, subjectId, year },
+      where: { studentId, subjectId, year, lesson: LIVE_LESSON },
       orderBy: { slot: "asc" },
       select: { value: true, weight: true, kind: true, comment: true, lessonId: true, quarter: true },
     }),
     prisma.absence.findMany({
-      where: { studentId, subjectId, year },
+      where: { studentId, subjectId, year, lesson: LIVE_LESSON },
       select: { lessonId: true },
     }),
   ]);
@@ -398,7 +412,7 @@ export async function getStudentSubjectDetail(
 /** Последние оценки ученика — лента «что нового» в дневнике. */
 export async function getRecentGrades(studentId: string, year: number, take = 12) {
   return prisma.grade.findMany({
-    where: { studentId, year },
+    where: { studentId, year, lesson: LIVE_LESSON },
     orderBy: [{ lesson: { date: "desc" } }, { slot: "asc" }],
     take,
     select: {
@@ -420,8 +434,8 @@ export async function getAdminStats() {
     prisma.user.count({ where: { role: "TEACHER" } }),
     prisma.user.count({ where: { role: "STUDENT" } }),
     prisma.subject.count(),
-    prisma.grade.count(),
-    prisma.lesson.count(),
+    prisma.grade.count({ where: { lesson: LIVE_LESSON } }),
+    prisma.lesson.count({ where: LIVE_LESSON }),
   ]);
 
   return { admins, teachers, students, subjects, grades, lessons };
@@ -442,7 +456,62 @@ export async function getAllUsers() {
       tempPassword: true,
       lastLoginAt: true,
       createdAt: true,
-      _count: { select: { grades: true } },
+      _count: { select: { grades: { where: { lesson: LIVE_LESSON } } } },
     },
   });
+}
+
+/**
+ * Темы прошлых уроков предмета (все годы, без повторов, свежие первыми) —
+ * подсказки <datalist> в форме создания урока. Только чтение.
+ */
+export async function getTopicSuggestions(subjectId: string): Promise<string[]> {
+  const rows = await prisma.lesson.findMany({
+    where: { subjectId, ...LIVE_LESSON, NOT: { topic: null } },
+    distinct: ["topic"],
+    orderBy: { date: "desc" },
+    take: 100,
+    select: { topic: true },
+  });
+  return rows
+    .map((row) => row.topic)
+    .filter((topic): topic is string => Boolean(topic && topic.trim()));
+}
+
+/** Уроки в корзине — для страницы /journal/trash, свежеудалённые сверху. */
+export async function getTrashedLessons() {
+  return prisma.lesson.findMany({
+    where: { NOT: { deletedAt: null } },
+    orderBy: { deletedAt: "desc" },
+    select: {
+      id: true,
+      date: true,
+      quarter: true,
+      year: true,
+      topic: true,
+      deletedAt: true,
+      subject: { select: { name: true } },
+      _count: { select: { grades: true, absences: true } },
+    },
+  });
+}
+
+export const AUDIT_PAGE_SIZE = 50;
+
+/** Страница журнала изменений: свежие записи сверху, фильтр по типу действия. */
+export async function getAuditLog(options: { action?: AuditAction | null; page: number }) {
+  const where = options.action ? { action: options.action } : {};
+  const page = Math.max(1, options.page);
+
+  const [total, entries] = await Promise.all([
+    prisma.auditLog.count({ where }),
+    prisma.auditLog.findMany({
+      where,
+      orderBy: { createdAt: "desc" },
+      skip: (page - 1) * AUDIT_PAGE_SIZE,
+      take: AUDIT_PAGE_SIZE,
+    }),
+  ]);
+
+  return { entries, total, pages: Math.max(1, Math.ceil(total / AUDIT_PAGE_SIZE)) };
 }

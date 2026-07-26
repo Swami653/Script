@@ -91,6 +91,10 @@ model Lesson {
   quarter   Int
   topic     String?
   createdAt DateTime @default(now())
+  /// Момент перемещения в корзину. null — живой урок. Журнал, отчёты и экспорт
+  /// показывают только живые уроки; урок из корзины можно восстановить или
+  /// удалить навсегда (тогда каскадом уйдут его оценки и отметки «Н»).
+  deletedAt DateTime?
 
   subjectId String
   subject   Subject @relation(fields: [subjectId], references: [id], onDelete: Cascade)
@@ -101,7 +105,11 @@ model Lesson {
   grades   Grade[]
   absences Absence[]
 
-  @@unique([subjectId, date])
+  // Уникальность «один урок на дату по предмету» действует только для живых
+  // уроков и живёт в частичном SQL-индексе Lesson_subjectId_date_live_key
+  // (см. migrations/4_phase2) — Prisma частичные индексы описывать не умеет,
+  // поэтому здесь остаётся обычный индекс для быстрых выборок по дате.
+  @@index([subjectId, date])
   @@index([subjectId, year, quarter])
 }
 
@@ -132,6 +140,29 @@ model QuarterPeriod {
 
   @@unique([year, quarter])
   @@index([year])
+}
+
+/// Запись журнала изменений (аудита). Хранит СНИМКИ имён, а не связи:
+/// запись должна пережить удаление пользователя, урока и предмета,
+/// поэтому внешних ключей здесь нет намеренно.
+model AuditLog {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+
+  /// id автора действия — без связи с User: пользователь может быть удалён.
+  actorId   String
+  /// Снимок имени автора на момент действия.
+  actorName String
+  /// Тип действия: "grade.set" | "lesson.delete" | … (см. src/lib/audit-actions.ts).
+  action    String
+  /// Снимок: ФИО ученика или логин пользователя, которого коснулось действие.
+  targetName  String?
+  /// Снимок названия предмета, если действие связано с уроком или оценкой.
+  subjectName String?
+  /// Человекочитаемое описание по-русски: «Математика, урок 12.09: оценка 8…».
+  details   String
+
+  @@index([createdAt])
 }
 
 /// Отметка отсутствия ученика на уроке («Н»). В средний балл НЕ входит —

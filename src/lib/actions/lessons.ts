@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache";
 import { z } from "zod";
 
 import { actionError, actionFail, actionOk, type ActionResult } from "@/lib/action-result";
+import { lessonRef, logAudit } from "@/lib/audit";
 import { requireRole } from "@/lib/auth-guards";
 import { quarterSchema } from "@/lib/grades";
 import { prisma } from "@/lib/prisma";
@@ -62,12 +63,28 @@ export async function createLessonAction(input: {
     }
     const year = matched?.year ?? academicYearOf(date);
 
-    const duplicate = await prisma.lesson.findUnique({
-      where: { subjectId_date: { subjectId: parsed.subjectId, date } },
+    // «Один урок на дату» действует только среди живых уроков — уникальность
+    // обеспечивает частичный индекс в БД (см. migrations/4_phase2).
+    const duplicate = await prisma.lesson.findFirst({
+      where: { subjectId: parsed.subjectId, date, deletedAt: null },
       select: { id: true, quarter: true },
     });
     if (duplicate) {
       return actionFail(`Урок на эту дату уже существует (${duplicate.quarter} четверть)`, 409);
+    }
+
+    // Урок на эту дату лежит в корзине — подсказываем восстановить его,
+    // а не заводить второй такой же столбец с потерей старых оценок.
+    const trashed = await prisma.lesson.findFirst({
+      where: { subjectId: parsed.subjectId, date, NOT: { deletedAt: null } },
+      select: { id: true },
+    });
+    if (trashed) {
+      return actionFail(
+        "Урок на эту дату лежит в корзине. Восстановите его в разделе «Корзина» — " +
+          "оценки вернутся в журнал — или удалите там навсегда.",
+        409,
+      );
     }
 
     const lesson = await prisma.lesson.create({
@@ -104,9 +121,10 @@ export async function updateLessonAction(input: {
 
     const lesson = await prisma.lesson.findUnique({
       where: { id: parsed.lessonId },
-      select: { id: true },
+      select: { id: true, deletedAt: true },
     });
     if (!lesson) return actionFail("Урок не найден", 404);
+    if (lesson.deletedAt) return actionFail("Урок в корзине — сначала восстановите его", 409);
 
     await prisma.lesson.update({
       where: { id: parsed.lessonId },
@@ -120,25 +138,155 @@ export async function updateLessonAction(input: {
   }
 }
 
-/** Удаление урока удаляет и все оценки этого столбца (onDelete: Cascade). */
+/**
+ * Удаление урока — МЯГКОЕ: урок помечается deletedAt и попадает в корзину
+ * (/journal/trash), а оценки и отметки «Н» остаются при нём и вернутся
+ * при восстановлении. Физическое удаление — destroyLessonAction.
+ */
 export async function deleteLessonAction(input: {
   lessonId: string;
 }): Promise<ActionResult<null>> {
   try {
-    await requireRole(GRADE_EDITOR_ROLES);
+    const teacher = await requireRole(GRADE_EDITOR_ROLES);
     const lessonId = z.string().min(1).parse(input.lessonId);
 
     const lesson = await prisma.lesson.findUnique({
       where: { id: lessonId },
-      select: { id: true },
+      select: {
+        id: true,
+        date: true,
+        topic: true,
+        deletedAt: true,
+        subject: { select: { name: true } },
+      },
     });
     if (!lesson) return actionFail("Урок не найден", 404);
+    if (lesson.deletedAt) return actionFail("Урок уже в корзине", 400);
+
+    await prisma.lesson.update({
+      where: { id: lessonId },
+      data: { deletedAt: new Date() },
+    });
+
+    await logAudit({
+      actor: teacher,
+      action: "lesson.delete",
+      subjectName: lesson.subject.name,
+      details:
+        `${lessonRef(lesson.subject.name, lesson.date)}` +
+        `${lesson.topic ? ` («${lesson.topic}»)` : ""} перемещён в корзину`,
+    });
+
+    revalidatePath("/journal");
+    revalidatePath("/journal/trash");
+    revalidatePath("/student");
+    return actionOk(null, "Урок перемещён в корзину");
+  } catch (error) {
+    return actionError(error);
+  }
+}
+
+/** Восстановить урок из корзины: оценки и «Н» снова видны в журнале. */
+export async function restoreLessonAction(input: {
+  lessonId: string;
+}): Promise<ActionResult<null>> {
+  try {
+    const teacher = await requireRole(GRADE_EDITOR_ROLES);
+    const lessonId = z.string().min(1).parse(input.lessonId);
+
+    const lesson = await prisma.lesson.findUnique({
+      where: { id: lessonId },
+      select: {
+        id: true,
+        date: true,
+        topic: true,
+        deletedAt: true,
+        subjectId: true,
+        subject: { select: { name: true } },
+      },
+    });
+    if (!lesson) return actionFail("Урок не найден", 404);
+    if (!lesson.deletedAt) return actionFail("Урок не в корзине", 400);
+
+    // Пока урок лежал в корзине, на его дату могли завести новый —
+    // два живых урока на одну дату не допускаются (частичный индекс в БД).
+    const conflict = await prisma.lesson.findFirst({
+      where: { subjectId: lesson.subjectId, date: lesson.date, deletedAt: null },
+      select: { id: true },
+    });
+    if (conflict) {
+      return actionFail(
+        "Восстановить нельзя: на эту дату уже есть другой урок по этому предмету. " +
+          "Сначала удалите его — или оставьте урок в корзине.",
+        409,
+      );
+    }
+
+    await prisma.lesson.update({
+      where: { id: lessonId },
+      data: { deletedAt: null },
+    });
+
+    await logAudit({
+      actor: teacher,
+      action: "lesson.restore",
+      subjectName: lesson.subject.name,
+      details:
+        `${lessonRef(lesson.subject.name, lesson.date)}` +
+        `${lesson.topic ? ` («${lesson.topic}»)` : ""} восстановлен из корзины`,
+    });
+
+    revalidatePath("/journal");
+    revalidatePath("/journal/trash");
+    revalidatePath("/student");
+    return actionOk(null, "Урок восстановлен");
+  } catch (error) {
+    return actionError(error);
+  }
+}
+
+/**
+ * Удалить урок НАВСЕГДА — только из корзины. Физическое удаление каскадом
+ * забирает оценки и отметки «Н» этого столбца (onDelete: Cascade).
+ */
+export async function destroyLessonAction(input: {
+  lessonId: string;
+}): Promise<ActionResult<null>> {
+  try {
+    const teacher = await requireRole(GRADE_EDITOR_ROLES);
+    const lessonId = z.string().min(1).parse(input.lessonId);
+
+    const lesson = await prisma.lesson.findUnique({
+      where: { id: lessonId },
+      select: {
+        id: true,
+        date: true,
+        topic: true,
+        deletedAt: true,
+        subject: { select: { name: true } },
+        _count: { select: { grades: true, absences: true } },
+      },
+    });
+    if (!lesson) return actionFail("Урок не найден", 404);
+    if (!lesson.deletedAt) {
+      return actionFail("Навсегда удалить можно только урок из корзины", 400);
+    }
 
     await prisma.lesson.delete({ where: { id: lessonId } });
 
+    await logAudit({
+      actor: teacher,
+      action: "lesson.delete",
+      subjectName: lesson.subject.name,
+      details:
+        `${lessonRef(lesson.subject.name, lesson.date)} удалён навсегда ` +
+        `(оценок: ${lesson._count.grades}, отметок «Н»: ${lesson._count.absences})`,
+    });
+
     revalidatePath("/journal");
+    revalidatePath("/journal/trash");
     revalidatePath("/student");
-    return actionOk(null, "Урок и его оценки удалены");
+    return actionOk(null, "Урок удалён навсегда вместе с оценками");
   } catch (error) {
     return actionError(error);
   }

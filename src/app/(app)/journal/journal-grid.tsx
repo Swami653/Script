@@ -1286,10 +1286,15 @@ function DeleteLessonButton({
       variant="ghost"
       size="icon"
       className="h-4 w-4 opacity-0 transition-opacity focus-visible:opacity-100 group-hover:opacity-100"
-      title="Удалить урок вместе с оценками"
+      title="Переместить урок в корзину"
       loading={pending}
       onClick={() => {
-        if (!window.confirm("Удалить этот урок и все оценки за него?")) return;
+        if (
+          !window.confirm(
+            "Переместить урок в корзину? Оценки сохранятся и вернутся при восстановлении.",
+          )
+        )
+          return;
         startTransition(async () => {
           const result = await deleteLessonAction({ lessonId });
           if (!result.ok) {

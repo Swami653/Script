@@ -25,6 +25,8 @@ async function main() {
     await prisma.quarterPeriod.deleteMany();
     await prisma.user.deleteMany();
     await prisma.appSetting.deleteMany();
+    // Журнал изменений не связан внешними ключами — чистим явно.
+    await prisma.auditLog.deleteMany();
     console.log("   база очищена");
   }
 

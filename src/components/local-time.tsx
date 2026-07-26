@@ -36,3 +36,42 @@ export function LocalTime({ iso }: { iso: string }) {
 
   return <time dateTime={iso}>{text}</time>;
 }
+
+/** «05.11.2025» — только дата, в поясе БРАУЗЕРА. */
+function formatLocalDate(iso: string): string {
+  return new Date(iso).toLocaleDateString("ru-RU", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+  });
+}
+
+/** То же в UTC — совпадает на сервере и при первом рендере клиента. */
+function formatUtcDate(iso: string): string {
+  const d = new Date(iso);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${pad(d.getUTCDate())}.${pad(d.getUTCMonth() + 1)}.${d.getUTCFullYear()}`;
+}
+
+/**
+ * Дата настоящего момента (закрытие четверти, снятие долга) строкой — там,
+ * где компонент не вставить: например, внутрь SVG-штампа.
+ *
+ * Двухфазность та же, что у LocalTime: первый рендер — UTC (сервер и клиент
+ * совпадают, гидратация не рушится), после эффекта — местный пояс. Без этого
+ * закрытие четверти в час ночи по Москве датировалось бы вчерашним днём.
+ */
+export function LocalDate({ iso }: { iso: string }) {
+  const text = useLocalDateLabel(iso);
+  return <time dateTime={iso}>{text}</time>;
+}
+
+export function useLocalDateLabel(iso: string): string {
+  const [text, setText] = useState(() => formatUtcDate(iso));
+
+  useEffect(() => {
+    setText(formatLocalDate(iso));
+  }, [iso]);
+
+  return text;
+}

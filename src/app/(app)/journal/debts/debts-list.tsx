@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useState, useTransition } from "react";
 
 import { Flash, useFlash } from "@/components/flash";
+import { LocalDate } from "@/components/local-time";
 import { Button } from "@/components/ui/button";
 import { Label, Select } from "@/components/ui/field";
 import { setGradeAction } from "@/lib/actions/grades";
@@ -166,7 +167,7 @@ export function DebtsList({
                     </span>
                   ) : (
                     <span className="shrink-0 text-xs text-muted-foreground">
-                      снят{debt.clearedAt ? ` ${formatDateShort(debt.clearedAt)}` : ""}
+                      снят{debt.clearedAt ? <> <LocalDate iso={debt.clearedAt} /></> : ""}
                     </span>
                   )}
                 </li>
@@ -288,16 +289,22 @@ function OpenDebtRow({
         </span>
 
         <span className="flex shrink-0 items-center gap-1.5">
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => setRetakeOpen((value) => !value)}
-            aria-expanded={retakeOpen}
-            disabled={pending}
-          >
-            <HandCoins className="h-3.5 w-3.5" aria-hidden />
-            Принять пересдачу
-          </Button>
+          {/* Под замком клавиатуру оценок не предлагаем вовсе: сервер ответит
+              423, а кнопки, обречённые на отказ, — не интерфейс. Чип «четверть
+              закрыта» рядом уже объясняет, что делать: принять пересдачу уроком
+              текущей четверти и снять долг вручную. */}
+          {!debt.quarterLocked && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setRetakeOpen((value) => !value)}
+              aria-expanded={retakeOpen}
+              disabled={pending}
+            >
+              <HandCoins className="h-3.5 w-3.5" aria-hidden />
+              Принять пересдачу
+            </Button>
+          )}
           <Button variant="ghost" size="sm" onClick={clearDebt} disabled={pending}>
             Снять долг
           </Button>

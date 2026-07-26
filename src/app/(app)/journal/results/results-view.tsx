@@ -15,6 +15,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useMemo, useState, useTransition } from "react";
 
 import { ClosedStamp } from "@/components/closed-stamp";
+import { LocalDate, useLocalDateLabel } from "@/components/local-time";
 import { Flash, useFlash } from "@/components/flash";
 import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -268,6 +269,7 @@ export function ResultsView({
           quarter={quarter}
           year={year}
           isAdmin={isAdmin}
+          filteredClassName={className}
           onFlash={show}
         />
       ) : review.lessonsTotal === 0 ? (
@@ -330,9 +332,22 @@ export function ResultsView({
           {/* ── Чипы-фильтры ───────────────────────────────────────────────── */}
           <div className="flex items-center gap-1.5 overflow-x-auto px-1 pb-1">
             {noObstacles ? (
-              <p className="flex items-center gap-1.5 text-sm font-medium text-emerald-700 dark:text-emerald-300">
+              /* Под фильтром класса чипы считаются по ОДНОМУ классу, а закрытие
+                 фиксирует предмет целиком по всем. Обещать «можно закрывать»,
+                 глядя на часть школы, — та же ложь умолчанием, что уже чинилась
+                 в строке про размер ведомости. */
+              <p
+                className={cn(
+                  "flex items-center gap-1.5 text-sm font-medium",
+                  className
+                    ? "text-muted-foreground"
+                    : "text-emerald-700 dark:text-emerald-300",
+                )}
+              >
                 <CheckCircle2 className="h-4 w-4" aria-hidden />
-                Препятствий нет — можно закрывать
+                {className
+                  ? `В классе ${className} препятствий нет — но закрывается весь предмет`
+                  : "Препятствий нет — можно закрывать"}
               </p>
             ) : (
               <>
@@ -718,6 +733,11 @@ function RowFlags({ row, className }: { row: ReviewRowView; className?: string }
 
 /* ── Закрытая четверть: штамп, ведомость из снимка, переоткрытие ──────────── */
 
+/** Штамп строки списка: хук местной даты нельзя вызвать внутри map. */
+function RowStamp({ iso }: { iso: string }) {
+  return <ClosedStamp dateLabel={useLocalDateLabel(iso)} size="sm" className="shrink-0" />;
+}
+
 function LockedSection({
   review,
   subjectId,
@@ -725,6 +745,7 @@ function LockedSection({
   quarter,
   year,
   isAdmin,
+  filteredClassName,
   onFlash,
 }: {
   review: ReviewView;
@@ -733,6 +754,8 @@ function LockedSection({
   quarter: Quarter;
   year: number;
   isAdmin: boolean;
+  /** Выбранный в фильтре класс — ведомость его НЕ соблюдает, и это надо сказать. */
+  filteredClassName: string | null;
   onFlash: (tone: "success" | "error", text: string) => void;
 }) {
   const router = useRouter();
@@ -741,6 +764,9 @@ function LockedSection({
   const [reason, setReason] = useState("");
   const locked = review.locked!;
   const results = review.results ?? [];
+  /* closedAt — настоящий момент, а не «полночь UTC» урока: закрытие в час ночи
+     по Москве иначе датировалось бы вчерашним днём прямо на штампе. */
+  const closedLabel = useLocalDateLabel(locked.closedAt);
 
   function reopen() {
     startTransition(async () => {
@@ -763,13 +789,13 @@ function LockedSection({
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center gap-4 rounded-lg border border-rule-strong bg-card p-4">
-        <ClosedStamp dateLabel={formatDateShort(locked.closedAt)} size="md" />
+        <ClosedStamp dateLabel={closedLabel} size="md" />
         <div className="min-w-0 flex-1">
           <p className="text-sm font-semibold">
             {quarter} четверть по предмету «{subjectName}» закрыта
           </p>
           <p className="mt-0.5 text-sm text-muted-foreground">
-            {formatDateLong(locked.closedAt)} · {locked.closedByName} · оценки периода — только
+            <LocalDate iso={locked.closedAt} /> · {locked.closedByName} · оценки периода — только
             чтение. Ниже — официальная ведомость на момент закрытия.
           </p>
         </div>
@@ -814,6 +840,11 @@ function LockedSection({
         <span className="font-semibold tabular-nums text-foreground">{results.length}</span>{" "}
         {pluralize(results.length, "ученик", "ученика", "учеников")} — состав зафиксирован на
         момент закрытия и не меняется, даже если ученика потом удалили.
+        {/* Снимок пишется без фильтра класса: молча показывать полную ведомость
+            при выбранном классе — значит врать о том, что видит учитель */}
+        {filteredClassName
+          ? ` Ведомость всегда полная по всем классам — фильтр «${filteredClassName}» к ней не применяется.`
+          : ""}
       </p>
 
       <div className="journal-scroll overflow-x-auto rounded-lg border border-rule-strong shadow-sm">
@@ -974,8 +1005,11 @@ function ClosePanel({
             <li>закрывается весь предмет по всем классам;</li>
             {totalDebts > 0 && (
               <li className="text-amber-700 dark:text-amber-300">
-                открытых долгов: {totalDebts} — после закрытия пересдача в клетки этой четверти
-                станет невозможна (принимать уроком текущей четверти);
+                {/* Долги считаются по показанным строкам: под фильтром класса это
+                    не все долги предмета, и молчать об этом нельзя */}
+                открытых долгов{classFiltered ? " в выбранном классе" : ""}: {totalDebts} — после
+                закрытия пересдача в клетки этой четверти станет невозможна (принимать уроком
+                текущей четверти);
               </li>
             )}
             {isCurrentQuarter && (
@@ -1116,7 +1150,7 @@ function BulkClosePanel({
                   </Link>
                   <span className="text-xs tabular-nums text-muted-foreground">
                     {row.locked
-                      ? `закрыта ${formatDateShort(row.locked.closedAt)}`
+                      ? <>закрыта <LocalDate iso={row.locked.closedAt} /></>
                       : row.lessonsTotal === 0
                         ? "уроков нет — закрывать нечего"
                         : `уроков ${row.lessonsTotal} · учеников ${row.students}`}
@@ -1141,11 +1175,7 @@ function BulkClosePanel({
                   ))}
               </label>
               {row.locked && (
-                <ClosedStamp
-                  dateLabel={formatDateShort(row.locked.closedAt)}
-                  size="sm"
-                  className="shrink-0"
-                />
+                <RowStamp iso={row.locked.closedAt} />
               )}
             </li>
           );

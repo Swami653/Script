@@ -11,6 +11,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input, Select } from "@/components/ui/field";
 import { deleteUserAction, resetPasswordAction, updateUserRoleAction } from "@/lib/actions/users";
+import { isGradelessClassName } from "@/lib/gradeless";
 import { ROLE_LABELS, ROLES, type Role } from "@/lib/roles";
 import { cn } from "@/lib/utils";
 
@@ -237,7 +238,19 @@ export function UsersTable({
                     )}
                   </td>
 
-                  <td className="px-3 py-2 text-muted-foreground">{user.className ?? "—"}</td>
+                  <td className="px-3 py-2 text-muted-foreground">
+                    {user.className ?? "—"}
+                    {/* Бейдж — по тому же предикату, что и запрет оценок на
+                        сервере: ошибка парсинга названия класса видна сразу */}
+                    {user.role === "STUDENT" && isGradelessClassName(user.className) && (
+                      <span
+                        className="ml-1.5 inline-block rounded border border-primary/40 px-1 text-[10px] font-semibold uppercase tracking-wide text-primary"
+                        title="1–2 класс: безотметочное обучение — печати и уровни вместо оценок"
+                      >
+                        безотметочный
+                      </span>
+                    )}
+                  </td>
                   <td className="px-3 py-2 text-center tabular-nums">{user.grades}</td>
 
                   <td className="px-3 py-2">

@@ -138,6 +138,55 @@ export async function someAction(input: unknown) {
 живут только в ручном SQL и всплывут в диагностике дрейфа при будущем
 `prisma migrate dev`.
 
+### 1.5. Безотметочные классы: в 1–2 классах оценок НЕТ
+
+Признак безотметочности **не хранится в БД** — он выводится из ведущего числа
+`User.className` предикатом `isGradelessClassName` (`src/lib/gradeless.ts`,
+изоморфный модуль). Парсер читает **всю ведущую группу цифр** с нормализацией
+NFKC: «1А» → 1 (безотметочный), «10А» → 10 (обычный!). Неразборчивое название
+(«первый», «К1», пусто) — обычный оценочный класс: ложная безотметочность
+запретила бы ставить оценки, ложная оценочность лишь показывает прочерки.
+Таблица тестов парсера — в докблоке `classLeadingNumber`. Не дублируй предикат
+и не пытайся выразить его CHECK-ом.
+
+Вместо оценок у безотметочных: **печать-поощрение** за урок (`LessonStamp`,
+словарь `STAMP_KINDS`, до `MAX_STAMPS_PER_LESSON` за урок), **уровень
+освоения** (`MasteryMark`, `high`/`medium`/`low`, один на клетку) и
+**словесная характеристика за четверть** (`QuarterNote`, единственная точка
+ввода — шаг мастера «Итоги четверти»). Правила, которые нельзя нарушать:
+
+- **Уровень — НЕ оценка.** Он никогда не конвертируется в балл (никаких
+  high→8), не имеет числового значения и не попадает в
+  `weightedAverage`/`yearGrade`/`quarterMark`/`classSummary` ни при каких
+  условиях. «Средний уровень класса» не существует.
+- **Уровень никогда не отображается одиночной буквой «Н»** — она занята
+  отсутствием. В интерфейсе — глиф ●/◐/○ или слово, в CSV — полное слово.
+- **Ученик берётся ТОЛЬКО через `requireMarkTarget(studentId, policy)`**
+  (`lesson-guards.ts`) — вторая дверь рядом с `requireWritableLesson`.
+  Политики: `"graded"` — балл безотметочному невозможен (409); `"gradeless"` —
+  уровень/печать/характеристика оценочному невозможны (409); `"any"` —
+  посещаемость и ВСЕ удаления (иначе после перевода 2→3 мусор стал бы
+  неудаляемым). «Н» универсальна. Сырой `prisma.user.findUnique` по ученику
+  клетки в `src/lib/actions/*` — ошибка ревью. Формула действия с клеткой:
+  `requireRole → zod → requireWritableLesson → requireMarkTarget`.
+- **Клетка содержит одно из: оценки | уровень | «Н».** Взаимное вытеснение —
+  в одной `$transaction` в обе стороны, счётчики снятого — в аудит.
+  `setStampAction` отклоняет печать при стоящем «Н».
+- Замок четверти (1.4) распространяется и на уровни/печати; характеристика
+  без урока проверяется через `assertQuarterOpen`. В снимке `QuarterResult`
+  безотметочная строка — `gradeless: true`, `average`/`finalGrade` = null
+  (в ведомости «б/о», НИКОГДА «н/а») и `note` — снимок характеристики.
+- Долги: `syncControlDebts` не рождает авто-долг безотметочному ученику
+  (долг закрывается оценкой, которой у него не бывает) и растворяет
+  осиротевший после перевода 3→2; `markDebtAction` — 409.
+- Читалки отдают фактические данные независимо от текущего `className`
+  (история переживает перевод 2→3); `assessment` в отчётах — только
+  подсказка интерфейсу, что рисовать.
+- Будущие уведомления (Telegram/родитель) обязаны ветвиться по `assessment`:
+  события безотметочного — новая печать (`stamp.set`), «Н», домашка,
+  характеристика ИЗ СНИМКА `QuarterResult.note`; запрещённые события — любая
+  оценка, «средний балл», прогнозы.
+
 ---
 
 ## 2. Роли
@@ -162,6 +211,7 @@ export async function someAction(input: unknown) {
 prisma/
   schema.prisma          User · Subject · Lesson · Grade · QuarterPeriod · AppSetting
                          · QuarterLock · QuarterResult · Debt
+                         · LessonStamp · MasteryMark · QuarterNote (безотметочные 1–2 классы)
   migrations/            история изменений схемы (prisma migrate)
   bootstrap.ts           очистка по RESET_DATA + создание администратора
 src/
@@ -170,9 +220,12 @@ src/
   middleware.ts          первый рубеж: редиректы по ролям
   lib/
     grades.ts            ★ 10 баллов, 4 четверти, все расчёты (+quarterMark, isControlLesson)
+    gradeless.ts         ★ безотметочные 1–2 классы: isGradelessClassName, STAMP_KINDS,
+                           MASTERY_LEVELS, analyzeGradelessColumn (изоморфный)
     roles.ts             ★ роли и их права
     auth-guards.ts       ★ requireUser / requireRole / requirePageRole
-    lesson-guards.ts     ★ requireWritableLesson / assertQuarterOpen — дверь к уроку (замок, 423)
+    lesson-guards.ts     ★ requireWritableLesson / assertQuarterOpen / requireMarkTarget —
+                           двери к уроку (замок, 423) и к ученику (политика оценивания, 409)
     action-result.ts     единый формат ответа Server Actions (+DomainError/QuarterClosedError)
     queries.ts           чтение данных (журнал, отчёты, итоги четверти, долги)
     debts.ts             ★ syncControlDebts — идемпотентный редьюсер авто-долгов
@@ -182,16 +235,20 @@ src/
     school-year.ts       активный учебный год (AppSetting) и список известных лет
     students-import.ts   разбор списка ФИО и генерация логинов (изоморфный)
     password.ts          генерация временных паролей (только сервер)
-    actions/             ★ Server Actions: grades · lessons · subjects · users · quarters · debts · auth
+    actions/             ★ Server Actions: grades · gradeless · lessons · subjects · users
+                           · quarters · debts · auth
   app/
     login/               страница входа
     (app)/               общий каркас: журнал, дневник, админка, профиль
-      journal/results/   мастер «Итоги четверти»: закрытие (и пакетное), ведомость
+      journal/results/   мастер «Итоги четверти»: закрытие (и пакетное), ведомость,
+                         характеристики безотметочных классов
       journal/debts/     долги и пересдачи по предмету
       journal/year/      границы четвертей и активный учебный год
       student/subject/   разбор оценок ученика по одному предмету
+      student/gradeless-view.tsx  безотметочный дневник 1–2 класса (лист печатей)
     api/journal/export/  Route Handler: CSV-экспорт с проверкой роли
-  components/            UI-компоненты (closed-stamp — штамп «Закрыта»)
+  components/            UI-компоненты (closed-stamp — штамп «Закрыта»,
+                         stamp-seal — оттиск печати, level-chip — чип уровня)
 ```
 
 Файлы, помеченные ★, — ядро правил. Меняя их, перечитай раздел 1.
@@ -214,6 +271,13 @@ Subject 1─* Lesson 1─* Grade
   агрегатов. **Инвариант:** они всегда равны полям своего урока. Заполняй их только
   значениями из `lesson`, никогда из пользовательского ввода (см. `setGradeAction`).
 - `QuarterPeriod` — границы четверти учебного года, `AppSetting` — активный год.
+- Безотметочные таблицы (1–2 классы, см. §1.5): `LessonStamp` — печать за урок,
+  `@@unique([studentId, lessonId, kind])`; `MasteryMark` — уровень за урок,
+  `@@unique([studentId, lessonId])` (слотов «10/9» у уровня нет); `QuarterNote` —
+  характеристика, `@@unique([studentId, subjectId, year, quarter])`, урока не имеет.
+  У поурочных `subjectId`/`year`/`quarter` денормализованы СТРОГО из урока,
+  `subjectId` — скаляр без FK (прецедент `Absence`/`Debt`); у `QuarterNote` FK на
+  `Subject` есть — урока-посредника для каскада нет. CHECK-и — только в SQL миграции.
 
 Даты уроков хранятся как **полночь UTC** (`parseDateInputValue`) и форматируются
 UTC-методами (`formatDateShort`). Не переходи на локальные `getDate()` — дата поедет.
@@ -243,9 +307,11 @@ npm run db:studio  # Prisma Studio
 3. Валидация входа схемой `zod` — **всех** полей, включая id.
 4. Действие, меняющее оценки или «Н», получает урок ТОЛЬКО через
    `requireWritableLesson` (сырой `prisma.lesson.findUnique` в `actions/*` для
-   записи — ошибка ревью); действие, меняющее состав уроков, обязано вызвать
-   `assertQuarterOpen`; действие, меняющее клетки или пометку КР, обязано
-   вызвать `syncControlDebts(lessonId)` после записи и аудита (см. §1.4).
+   записи — ошибка ревью), а ученика клетки — ТОЛЬКО через `requireMarkTarget`
+   с политикой `"graded"`/`"gradeless"`/`"any"` (см. §1.5); действие, меняющее
+   состав уроков, обязано вызвать `assertQuarterOpen`; действие, меняющее
+   клетки или пометку КР, обязано вызвать `syncControlDebts(lessonId)` после
+   записи и аудита (см. §1.4).
 5. Работа с БД через `prisma`.
 6. `revalidatePath(...)` для затронутых разделов.
 7. `catch (error) { return actionError(error); }` — 401/403/400/423/500 разложатся сами.
@@ -315,10 +381,14 @@ Vercel применит её сама. Так сделана миграция `1
 - Не заводить оценки вне диапазона 1–10 и «пятую четверть».
 - Не дублировать формулы средних баллов — они в `src/lib/grades.ts`
   (это касается и `quarterMark`/`isControlLesson`/порогов мастера).
-- Не грузить урок для записи мимо `requireWritableLesson` и не «обходить»
-  замок четверти для ADMIN — путь один: переоткрыть, исправить, закрыть.
+- Не грузить урок для записи мимо `requireWritableLesson`, ученика клетки —
+  мимо `requireMarkTarget`, и не «обходить» замок четверти для ADMIN —
+  путь один: переоткрыть, исправить, закрыть.
 - Не подмешивать `finalGrade` снимка в годовую и не хранить четвертную
   отметку как `Grade`.
+- Не конвертировать уровни освоения в баллы (никаких high→8), не хранить
+  признак безотметочности в БД и не рендерить уровень одиночной буквой «Н»
+  (см. §1.5).
 - Не хранить пароли иначе как `bcrypt.hash(password, 10)`.
 - Не коммитить `.env` и `prisma/dev.db` (уже в `.gitignore`).
 - Не добавлять `enum` в схему Prisma (SQLite их не поддерживает).

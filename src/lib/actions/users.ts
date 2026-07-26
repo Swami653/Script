@@ -258,6 +258,10 @@ export async function resetPasswordAction(input: {
         tempPassword: password,
         mustChangePassword: true,
         lastLoginAt: null,
+        failedLoginCount: 0,
+        lockedUntil: null,
+        // Инвалидируем прежние сессии этого пользователя.
+        sessionVersion: { increment: 1 },
       },
     });
 
@@ -330,6 +334,8 @@ export async function changeOwnPasswordAction(input: {
         // Свой пароль пользователь придумал сам — администратору его не видно.
         tempPassword: null,
         mustChangePassword: false,
+        // Прочие сессии (например, на чужом устройстве) становятся недействительны.
+        sessionVersion: { increment: 1 },
       },
     });
 

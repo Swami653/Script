@@ -37,6 +37,12 @@ model User {
   tempPassword String?
   /// Момент первого/последнего успешного входа. null — пользователь ещё не входил.
   lastLoginAt DateTime?
+  /// Защита от перебора пароля: счётчик неудачных попыток и блокировка до времени.
+  failedLoginCount Int @default(0)
+  lockedUntil      DateTime?
+  /// Инвалидация сессий: увеличивается при смене/сбросе пароля. Кладётся в JWT;
+  /// если версия в токене отстала — сессия считается недействительной.
+  sessionVersion   Int @default(0)
   /// "ADMIN" | "TEACHER" | "STUDENT" — валидируется на сервере через src/lib/roles.ts
   role     String @default("STUDENT")
   /// Класс ученика, например "9-А". У администраторов и учителей обычно null.

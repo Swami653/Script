@@ -32,7 +32,11 @@ export function ChangePasswordForm() {
       setCurrentPassword("");
       setNewPassword("");
       setRepeatPassword("");
-      show("success", result.message ?? "Пароль изменён");
+      show("success", "Пароль изменён. Сейчас потребуется войти заново.");
+      // Пароль сменён — все сессии (в т.ч. эта) недействительны. Уводим на вход.
+      setTimeout(() => {
+        window.location.href = "/login";
+      }, 1500);
     });
   }
 

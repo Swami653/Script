@@ -136,26 +136,10 @@ export default async function LoginPage() {
 
           <LoginForm />
 
-          <div className="mt-8 border-t border-rule pt-5">
-            <p className="mb-2.5 text-[11px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">
-              Демонстрационные аккаунты
-            </p>
-            <dl className="space-y-1.5 text-[13px]">
-              {[
-                ["Администратор", "admin@school.com", "admin123"],
-                ["Учитель", "teacher@school.com", "teacher123"],
-                ["Ученик", "student@school.com", "student123"],
-              ].map(([role, email, password]) => (
-                <div key={role} className="flex items-baseline justify-between gap-3">
-                  <dt className="text-muted-foreground">{role}</dt>
-                  <dd className="text-right tabular-nums">
-                    <span className="font-medium">{email}</span>
-                    <span className="text-muted-foreground"> · {password}</span>
-                  </dd>
-                </div>
-              ))}
-            </dl>
-          </div>
+          <p className="mt-6 border-t border-rule pt-5 text-[13px] leading-relaxed text-muted-foreground">
+            Логин и пароль выдаёт администратор школы. Если пароль забыт — обратитесь
+            к нему: восстановить старый пароль нельзя, но можно выдать новый.
+          </p>
         </div>
       </section>
     </main>

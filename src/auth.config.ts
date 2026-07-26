@@ -23,6 +23,7 @@ export const authConfig = {
         token.role = asRole(user.role);
         token.username = user.username ?? null;
         token.className = user.className ?? null;
+        token.sessionVersion = typeof user.sessionVersion === "number" ? user.sessionVersion : 0;
       }
       if (trigger === "update" && session?.name) {
         token.name = session.name as string;
@@ -35,6 +36,8 @@ export const authConfig = {
         session.user.role = asRole(token.role);
         session.user.username = token.username ?? null;
         session.user.className = token.className ?? null;
+        session.user.sessionVersion =
+          typeof token.sessionVersion === "number" ? token.sessionVersion : 0;
       }
       return session;
     },

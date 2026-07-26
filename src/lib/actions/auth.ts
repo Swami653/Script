@@ -30,6 +30,15 @@ export async function loginAction(
     return {};
   } catch (error) {
     if (error instanceof AuthError) {
+      // Провайдер бросает CredentialsSignin с code="locked" при блокировке.
+      if ((error as { code?: string }).code === "locked") {
+        return {
+          error:
+            "Аккаунт временно заблокирован из-за нескольких неверных попыток. " +
+            "Подождите 15 минут или обратитесь к администратору.",
+          username,
+        };
+      }
       return { error: "Неверный логин или пароль", username };
     }
     throw error;

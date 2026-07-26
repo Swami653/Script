@@ -1,8 +1,16 @@
 "use client";
 
-import { BarChart3, ClipboardCheck, Eraser, ExternalLink, Trash2, UserX } from "lucide-react";
+import {
+  BarChart3,
+  ClipboardCheck,
+  Eraser,
+  ExternalLink,
+  History,
+  Trash2,
+  UserX,
+} from "lucide-react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState, useTransition } from "react";
 import { createPortal } from "react-dom";
 
@@ -19,6 +27,12 @@ import {
 } from "@/lib/actions/grades";
 import { deleteLessonAction } from "@/lib/actions/lessons";
 import {
+  buildAskStats,
+  LOW_GRADE_COUNT,
+  NOT_ASKED_WINDOW,
+  pickAskCandidates,
+} from "@/lib/ask-candidates";
+import {
   analyzeLessonColumn,
   averageColorClasses,
   averageGrade,
@@ -29,6 +43,7 @@ import {
   MAX_GRADE,
   MAX_GRADES_PER_LESSON,
   MIN_GRADE,
+  projectedAverage,
   weightForKind,
   weightedAverage,
   yearGrade,
@@ -113,14 +128,18 @@ export function JournalGrid({
   quarter,
   canEdit,
   subjectName,
+  askMode,
 }: {
   lessons: GridLesson[];
   rows: GridRow[];
   quarter: Quarter;
   canEdit: boolean;
   subjectName: string;
+  /** Режим «Кого спросить?» (?ask=1): подсветка кандидатов на опрос. */
+  askMode: boolean;
 }) {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const { flash, show, clear } = useFlash();
   const [, startTransition] = useTransition();
 
@@ -202,7 +221,13 @@ export function JournalGrid({
         const quarterAverages = row.quarterAverages.map((item, index) =>
           index === quarter - 1 ? average : item,
         );
-        return { average, year: yearGrade(quarterAverages) };
+        return {
+          average,
+          year: yearGrade(quarterAverages),
+          // Прогноз «а что, если»: средний после гипотетической 10 и после 1.
+          p10: projectedAverage(items, MAX_GRADE),
+          p1: projectedAverage(items, MIN_GRADE),
+        };
       }),
     [gradesAt, lessons.length, quarter, rows],
   );
@@ -211,6 +236,45 @@ export function JournalGrid({
     () => averageGrade(rowStats.map((s) => s.average).filter((v): v is number => v !== null)),
     [rowStats],
   );
+
+  /**
+   * Накопляемость и «Кого спросить?». Окно «давно не спрашивали» считается
+   * ТОЛЬКО по прошедшим урокам (date <= сегодня UTC): будущие столбцы сетки
+   * не делают весь класс «давно не спрошенным». Считается поверх gradesAt и
+   * isAbsent — оптимистичные оценки учитываются до ответа сервера.
+   */
+  const askStats = useMemo(() => {
+    const todayMs = todayUtcMidnight().getTime();
+    const pastLessonIds = lessons
+      .filter((lesson) => new Date(lesson.date).getTime() <= todayMs)
+      .map((lesson) => lesson.id);
+    return rows.map((row, rowIndex) => {
+      const cellGradeCounts: Record<string, number> = {};
+      const absentLessonIds: string[] = [];
+      for (let colIndex = 0; colIndex < lessons.length; colIndex += 1) {
+        const count = gradesAt(rowIndex, colIndex).length;
+        if (count > 0) cellGradeCounts[lessons[colIndex]!.id] = count;
+        if (isAbsent(rowIndex, colIndex)) absentLessonIds.push(lessons[colIndex]!.id);
+      }
+      return {
+        studentId: row.studentId,
+        name: row.name,
+        ...buildAskStats({ pastLessonIds, cellGradeCounts, absentLessonIds }),
+      };
+    });
+  }, [gradesAt, isAbsent, lessons, rows]);
+
+  const askCandidates = useMemo(
+    () => (askMode ? new Set(pickAskCandidates(askStats)) : new Set<string>()),
+    [askMode, askStats],
+  );
+
+  /** Скрыть режим «Кого спросить?»: убрать ?ask=1 из адреса. */
+  const hideAsk = useCallback(() => {
+    const params = new URLSearchParams(searchParams.toString());
+    params.delete("ask");
+    router.push(`/journal?${params.toString()}`);
+  }, [router, searchParams]);
 
   const focusCell = useCallback((rowIndex: number, colIndex: number) => {
     gridRef.current
@@ -577,6 +641,26 @@ export function JournalGrid({
 
   return (
     <>
+      {/* ── «Кого спросить?»: критерии подсветки и выключатель ────────────── */}
+      {askMode && (
+        <div className="animate-fade-in flex flex-wrap items-center justify-between gap-x-3 gap-y-1 rounded-lg border border-primary/30 bg-primary/[0.04] px-3 py-2 text-xs text-muted-foreground">
+          <span>
+            {askCandidates.size > 0
+              ? `Подсвечены кандидаты на опрос: меньше ${LOW_GRADE_COUNT} оценок за четверть ` +
+                `или нет оценок за последние ${NOT_ASKED_WINDOW} уроков; отсутствующие на ` +
+                `последнем уроке пропущены.`
+              : "Все спрошены недавно — подсветки нет."}
+          </span>
+          <button
+            type="button"
+            onClick={hideAsk}
+            className="focus-ring rounded px-1.5 py-0.5 font-medium text-primary transition-colors hover:bg-primary/10"
+          >
+            Скрыть
+          </button>
+        </div>
+      )}
+
       {/* ── Разворот ведомости: с планшета и шире ─────────────────────────── */}
       <div
         ref={gridRef}
@@ -661,8 +745,20 @@ export function JournalGrid({
           </thead>
 
           <tbody>
-            {rows.map((row, rowIndex) => (
-              <tr key={row.studentId} className="group/row hover:bg-primary/[0.04]">
+            {rows.map((row, rowIndex) => {
+              const ask = askStats[rowIndex];
+              const isAskCandidate = askCandidates.has(row.studentId);
+              const lowCount = (ask?.gradeCount ?? 0) < LOW_GRADE_COUNT;
+              const staleAsk = (ask?.lessonsSinceAsked ?? 0) >= NOT_ASKED_WINDOW;
+
+              return (
+              <tr
+                key={row.studentId}
+                className={cn(
+                  "group/row hover:bg-primary/[0.04]",
+                  isAskCandidate && "bg-primary/[0.06]",
+                )}
+              >
                 <th
                   scope="row"
                   className="sticky left-0 z-10 border-b border-r border-rule bg-card px-3 py-0 text-left font-normal shadow-[inset_3px_0_0_hsl(var(--spine))] group-hover/row:bg-accent/50"
@@ -672,11 +768,44 @@ export function JournalGrid({
                     className="focus-ring flex h-9 items-center justify-between gap-2 rounded"
                     title="Открыть карточку ученика — оценки по всем предметам"
                   >
-                    <span className="truncate">{row.name}</span>
-                    <ExternalLink
-                      className="h-3.5 w-3.5 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover/row:opacity-100"
-                      aria-hidden
-                    />
+                    <span className="flex min-w-0 items-center gap-1.5">
+                      <span className="truncate">{row.name}</span>
+                      {isAskCandidate && (
+                        <span className="inline-block shrink-0 -rotate-2 rounded border border-primary/60 px-1 text-[10px] font-semibold uppercase tracking-wide text-primary">
+                          спросить
+                        </span>
+                      )}
+                    </span>
+                    {/* Накопляемость: постоянный счётчик, на hover уступает
+                        место стрелке перехода в карточку ученика */}
+                    <span className="relative flex h-3.5 shrink-0 items-center">
+                      <span
+                        className="flex items-center gap-0.5 transition-opacity group-hover/row:opacity-0"
+                        title={`Оценок за четверть: ${ask?.gradeCount ?? 0}${
+                          staleAsk
+                            ? ` · без оценки ${ask!.lessonsSinceAsked} прошедших уроков подряд`
+                            : ""
+                        }`}
+                      >
+                        {staleAsk && (
+                          <History className="h-3 w-3 text-muted-foreground" aria-hidden />
+                        )}
+                        <span
+                          className={cn(
+                            "w-7 text-right text-[11px] tabular-nums",
+                            lowCount
+                              ? "font-semibold text-amber-600 dark:text-amber-300"
+                              : "text-muted-foreground",
+                          )}
+                        >
+                          {ask?.gradeCount ?? 0}
+                        </span>
+                      </span>
+                      <ExternalLink
+                        className="absolute right-0 h-3.5 w-3.5 text-muted-foreground opacity-0 transition-opacity group-hover/row:opacity-100"
+                        aria-hidden
+                      />
+                    </span>
                   </Link>
                 </th>
 
@@ -729,15 +858,23 @@ export function JournalGrid({
 
                 <td className="border-b border-rule" />
 
-                <td className="border-b border-l border-rule-strong bg-secondary/30 px-3 py-1 text-center">
+                <td className="border-b border-l border-rule-strong bg-secondary/30 px-3 py-0 text-center">
                   <span
                     className={cn(
-                      "text-[15px] font-semibold tabular-nums",
+                      "block text-[15px] font-semibold leading-tight tabular-nums",
                       averageColorClasses(rowStats[rowIndex]?.average ?? null),
                     )}
                   >
                     {formatAverage(rowStats[rowIndex]?.average ?? null)}
                   </span>
+                  {/* Прогноз «а что, если»: цвета шкалы не применяются —
+                      это гипотетические числа, а не данные */}
+                  {rowStats[rowIndex]?.average != null && (
+                    <span className="block whitespace-nowrap text-[10px] leading-none tabular-nums text-muted-foreground">
+                      10→{formatAverage(rowStats[rowIndex]?.p10 ?? null)} · 1→
+                      {formatAverage(rowStats[rowIndex]?.p1 ?? null)}
+                    </span>
+                  )}
                 </td>
                 <td className="border-b border-rule bg-secondary/30 px-2 py-1 text-center">
                   <span
@@ -750,7 +887,8 @@ export function JournalGrid({
                   </span>
                 </td>
               </tr>
-            ))}
+              );
+            })}
           </tbody>
 
           <tfoot>
@@ -800,6 +938,7 @@ export function JournalGrid({
         onAbsent={(r, c) => markAbsent(r, c)}
         onClearAbsent={(r, c) => clearAbsent(r, c)}
         onOpenPanel={openMobilePanel}
+        askCandidates={askCandidates}
       />
 
       {/* ── Панели урока: перекличка и анализ/домашка/пометка КР ──────────── */}
@@ -949,19 +1088,22 @@ function MobileLessonBoard({
   onAbsent,
   onClearAbsent,
   onOpenPanel,
+  askCandidates,
 }: {
   lessons: GridLesson[];
   rows: GridRow[];
   canEdit: boolean;
   gradesAt: (row: number, col: number) => GridGrade[];
   isAbsent: (row: number, col: number) => boolean;
-  rowStats: { average: number | null; year: number | null }[];
+  rowStats: { average: number | null; year: number | null; p10: number | null; p1: number | null }[];
   onPick: (row: number, col: number, value: number, slot: number, kind: GradeKind, comment?: string) => void;
   onUpdateMeta: (row: number, col: number, kind: GradeKind, comment: string) => void;
   onRemove: (row: number, col: number, slot: number) => void;
   onAbsent: (row: number, col: number) => void;
   onClearAbsent: (row: number, col: number) => void;
   onOpenPanel: (type: "insight" | "attendance", lessonId: string) => void;
+  /** Кандидаты «Кого спросить?» — тот же штамп, что и в развороте. */
+  askCandidates: ReadonlySet<string>;
 }) {
   const [colIndex, setColIndex] = useState(() => lastPastLessonIndex(lessons));
   const [openRow, setOpenRow] = useState<number | null>(null);
@@ -1044,9 +1186,20 @@ function MobileLessonBoard({
                   href={`/journal/students/${row.studentId}`}
                   className="focus-ring min-w-0 flex-1 rounded"
                 >
-                  <span className="block truncate text-sm font-medium">{shortName(row.name)}</span>
-                  <span className="block text-[11px] text-muted-foreground">
+                  <span className="flex min-w-0 items-center gap-1.5">
+                    <span className="truncate text-sm font-medium">{shortName(row.name)}</span>
+                    {askCandidates.has(row.studentId) && (
+                      <span className="inline-block shrink-0 -rotate-2 rounded border border-primary/60 px-1 text-[10px] font-semibold uppercase tracking-wide text-primary">
+                        спросить
+                      </span>
+                    )}
+                  </span>
+                  <span className="block text-[11px] tabular-nums text-muted-foreground">
                     средний за четверть: {formatAverage(rowStats[rowIndex]?.average ?? null)}
+                    {rowStats[rowIndex]?.average != null &&
+                      ` · 10→${formatAverage(rowStats[rowIndex]?.p10 ?? null)} · 1→${formatAverage(
+                        rowStats[rowIndex]?.p1 ?? null,
+                      )}`}
                   </span>
                 </Link>
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { CalendarPlus, Download, Keyboard, Users, X } from "lucide-react";
+import { CalendarPlus, Download, Keyboard, Sparkles, Users, X } from "lucide-react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useState, useTransition } from "react";
@@ -10,6 +10,7 @@ import {
   type BulkLesson,
   type BulkStudent,
 } from "@/app/(app)/journal/bulk-grade-panel";
+import { LessonGridForm } from "@/app/(app)/journal/lesson-grid-form";
 import { Flash, useFlash } from "@/components/flash";
 import { Button } from "@/components/ui/button";
 import { FieldHint, Input, Label, Select } from "@/components/ui/field";
@@ -26,6 +27,8 @@ export function JournalToolbar({
   years,
   year,
   hasPeriods,
+  currentPeriod,
+  askMode,
   topicSuggestions,
   lessons,
   students,
@@ -38,9 +41,13 @@ export function JournalToolbar({
   years: number[];
   year: number;
   hasPeriods: boolean;
+  /** Границы выбранной четверти (ISO-даты) — для вкладки «Сетка на четверть». */
+  currentPeriod: { startDate: string; endDate: string } | null;
+  /** Включён ли режим «Кого спросить?» (?ask=1). */
+  askMode: boolean;
   /** Темы прошлых уроков предмета — подсказки в поле темы нового урока. */
   topicSuggestions: string[];
-  /** Уроки выбранной четверти — для панели массового выставления. */
+  /** Уроки выбранной четверти — для массового выставления и предпросмотра сетки. */
   lessons: BulkLesson[];
   /** Ученики журнала (с учётом фильтра по классу). */
   students: BulkStudent[];
@@ -48,8 +55,10 @@ export function JournalToolbar({
   const router = useRouter();
   const searchParams = useSearchParams();
   const { flash, show, clear } = useFlash();
-  const [addOpen, setAddOpen] = useState(false);
+  /** Открытая вкладка панели добавления: один урок или сетка на четверть. */
+  const [addTab, setAddTab] = useState<"one" | "grid" | null>(null);
   const [bulkOpen, setBulkOpen] = useState(false);
+  const [askPending, startAskTransition] = useTransition();
 
   function navigate(patch: Record<string, string | null>) {
     const params = new URLSearchParams(searchParams.toString());
@@ -141,21 +150,34 @@ export function JournalToolbar({
         )}
 
         <div className="ml-auto flex items-center gap-2">
+          {/* Экспорт — только иконка: текстовое место отдано «Кого спросить?» */}
           <a
             href={exportHref}
             download
             title="Скачать журнал в CSV — открывается в Excel"
-            className="focus-ring inline-flex h-10 items-center justify-center gap-2 rounded-md border border-input bg-card px-4 text-sm font-medium transition-colors hover:bg-accent"
+            aria-label="Экспорт журнала в CSV"
+            className="focus-ring inline-flex h-10 w-10 items-center justify-center rounded-md border border-input bg-card transition-colors hover:bg-accent"
           >
             <Download className="h-4 w-4" aria-hidden />
-            <span className="hidden sm:inline">Экспорт</span>
           </a>
+          <Button
+            variant="outline"
+            onClick={() => startAskTransition(() => navigate({ ask: askMode ? null : "1" }))}
+            loading={askPending}
+            aria-pressed={askMode}
+            aria-busy={askPending}
+            title="Подсветить учеников с малым числом оценок или давно не спрошенных"
+            className={cn(askMode && "border-primary text-primary")}
+          >
+            {!askPending && <Sparkles className="h-4 w-4" aria-hidden />}
+            <span className="hidden sm:inline">Кого спросить?</span>
+          </Button>
           {lessons.length > 0 && students.length > 0 && (
             <Button
               variant="outline"
               onClick={() => {
                 setBulkOpen((value) => !value);
-                setAddOpen(false);
+                setAddTab(null);
               }}
               title="Выставить оценку всем ученикам за один урок"
             >
@@ -171,33 +193,82 @@ export function JournalToolbar({
           )}
           <Button
             onClick={() => {
-              setAddOpen((value) => !value);
+              setAddTab((value) => (value ? null : "one"));
               setBulkOpen(false);
             }}
           >
-            {addOpen ? (
+            {addTab ? (
               <X className="h-4 w-4" aria-hidden />
             ) : (
               <CalendarPlus className="h-4 w-4" aria-hidden />
             )}
-            {addOpen ? "Отмена" : "Добавить урок"}
+            {addTab ? "Отмена" : "Добавить урок"}
           </Button>
         </div>
       </div>
 
-      {addOpen && (
-        <AddLessonForm
-          subjectId={subjectId}
-          quarter={quarter}
-          hasPeriods={hasPeriods}
-          topicSuggestions={topicSuggestions}
-          onDone={(message) => {
-            setAddOpen(false);
-            show("success", message);
-            router.refresh();
-          }}
-          onError={(message) => show("error", message)}
-        />
+      {addTab && (
+        <div className="animate-fade-in space-y-3 rounded-lg border border-rule-strong bg-secondary/50 p-3">
+          {/* Сегмент: один столбец или сетка на всю четверть вперёд */}
+          <div
+            className="flex w-fit rounded-md border border-input bg-card p-0.5"
+            role="group"
+            aria-label="Способ добавления уроков"
+          >
+            {(
+              [
+                ["one", "Один урок"],
+                ["grid", "Сетка на четверть"],
+              ] as const
+            ).map(([tab, label]) => (
+              <button
+                key={tab}
+                type="button"
+                onClick={() => setAddTab(tab)}
+                aria-pressed={addTab === tab}
+                className={cn(
+                  "focus-ring h-8 rounded px-3 text-sm font-medium transition-colors",
+                  addTab === tab
+                    ? "bg-primary text-primary-foreground shadow-sm"
+                    : "text-muted-foreground hover:bg-accent hover:text-foreground",
+                )}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+
+          {addTab === "one" ? (
+            <AddLessonForm
+              subjectId={subjectId}
+              quarter={quarter}
+              hasPeriods={hasPeriods}
+              topicSuggestions={topicSuggestions}
+              onDone={(message) => {
+                setAddTab(null);
+                show("success", message);
+                router.refresh();
+              }}
+              onError={(message) => show("error", message)}
+            />
+          ) : (
+            <LessonGridForm
+              /* key — чтобы при смене предмета/четверти выбор дней начинался заново */
+              key={`${subjectId}-${quarter}-${year}`}
+              subjectId={subjectId}
+              year={year}
+              quarter={quarter}
+              currentPeriod={currentPeriod}
+              lessons={lessons}
+              onDone={(message) => {
+                setAddTab(null);
+                show("success", message);
+                router.refresh();
+              }}
+              onError={(message) => show("error", message)}
+            />
+          )}
+        </div>
       )}
 
       {/* Условие то же, что у кнопки-переключателя: панель не должна оставаться
@@ -284,8 +355,9 @@ function AddLessonForm({
   const [lessonQuarter, setLessonQuarter] = useState<number>(quarter);
 
   return (
+    // Контейнер (рамка, фон) — у общей панели с вкладками в JournalToolbar
     <form
-      className="animate-fade-in flex flex-wrap items-end gap-3 rounded-lg border border-rule-strong bg-secondary/50 p-3"
+      className="flex flex-wrap items-end gap-3"
       onSubmit={(event) => {
         event.preventDefault();
         startTransition(async () => {

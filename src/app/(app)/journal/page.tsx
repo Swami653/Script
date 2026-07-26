@@ -31,6 +31,8 @@ type SearchParams = Promise<{
   quarter?: string;
   class?: string;
   year?: string;
+  /** «Кого спросить?»: ask=1 включает подсветку кандидатов на опрос. */
+  ask?: string;
 }>;
 
 export default async function JournalPage({ searchParams }: { searchParams: SearchParams }) {
@@ -73,6 +75,13 @@ export default async function JournalPage({ searchParams }: { searchParams: Sear
     : await defaultQuarter(subjectId, year, periods);
 
   const className = params.class && classNames.includes(params.class) ? params.class : null;
+  const askMode = params.ask === "1";
+
+  // Границы выбранной четверти — для вкладки «Сетка на четверть» в тулбаре.
+  const period = periods.find((item) => item.quarter === quarter);
+  const currentPeriod = period
+    ? { startDate: period.startDate.toISOString(), endDate: period.endDate.toISOString() }
+    : null;
 
   const data = await getJournalData(subjectId, quarter, year, className);
 
@@ -124,6 +133,8 @@ export default async function JournalPage({ searchParams }: { searchParams: Sear
         years={knownYears}
         year={year}
         hasPeriods={periods.length > 0}
+        currentPeriod={currentPeriod}
+        askMode={askMode}
         topicSuggestions={topicSuggestions}
         lessons={data.lessons.map((lesson) => ({
           id: lesson.id,
@@ -140,6 +151,7 @@ export default async function JournalPage({ searchParams }: { searchParams: Sear
         canEdit={GRADE_EDITOR_ROLES.includes(user.role)}
         quarter={quarter}
         subjectName={subjectName}
+        askMode={askMode}
         lessons={data.lessons.map((lesson) => ({
           id: lesson.id,
           date: lesson.date.toISOString(),

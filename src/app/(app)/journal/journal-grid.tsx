@@ -218,6 +218,58 @@ export function JournalGrid({
     [gradesAt, lessons, router, rows, show],
   );
 
+  /**
+   * Поменять тип работы и комментарий у уже выставленных оценок клетки.
+   *
+   * Нужно потому, что учитель сначала ставит цифру, а «за что» и комментарий
+   * дописывает после — окно выбора остаётся открытым. Тип и комментарий
+   * общие для обеих оценок клетки: «10/9» — это одна работа.
+   */
+  const updateCellMeta = useCallback(
+    (rowIndex: number, colIndex: number, kind: GradeKind, comment: string) => {
+      const row = rows[rowIndex];
+      const lesson = lessons[colIndex];
+      if (!row || !lesson) return;
+
+      const previous = gradesAt(rowIndex, colIndex);
+      if (previous.length === 0) return; // цифры ещё нет — правка уедет вместе с ней
+
+      const trimmed = comment.trim() || null;
+      const unchanged = previous.every((grade) => grade.kind === kind && grade.comment === trimmed);
+      if (unchanged) return;
+
+      const key = cellKey(row.studentId, lesson.id);
+      const next = previous.map((grade) => ({
+        ...grade,
+        kind,
+        weight: weightForKind(kind),
+        comment: trimmed,
+      }));
+      setOverrides((prev) => ({ ...prev, [key]: next }));
+
+      startTransition(async () => {
+        for (const [slot, grade] of previous.entries()) {
+          const result = await setGradeAction({
+            studentId: row.studentId,
+            lessonId: lesson.id,
+            value: grade.value,
+            slot,
+            kind,
+            comment: trimmed ?? "",
+          });
+          if (!result.ok) {
+            setOverrides((prev) => ({ ...prev, [key]: previous }));
+            show("error", `${result.status}: ${result.error}`);
+            return;
+          }
+        }
+        show("success", trimmed ? "Комментарий сохранён" : `Тип: ${GRADE_KINDS[kind].label}`);
+        router.refresh();
+      });
+    },
+    [gradesAt, lessons, router, rows, show],
+  );
+
   const removeGrade = useCallback(
     (rowIndex: number, colIndex: number, slot: number) => {
       const row = rows[rowIndex];
@@ -623,7 +675,8 @@ export function JournalGrid({
         gradesAt={gradesAt}
         isAbsent={isAbsent}
         rowStats={rowStats}
-        onPick={(r, c, value, slot, kind) => commitGrade(r, c, value, slot, kind)}
+        onPick={(r, c, value, slot, kind, comment) => commitGrade(r, c, value, slot, kind, comment)}
+        onUpdateMeta={(r, c, kind, comment) => updateCellMeta(r, c, kind, comment)}
         onRemove={(r, c, slot) => removeGrade(r, c, slot)}
         onAbsent={(r, c) => markAbsent(r, c)}
         onClearAbsent={(r, c) => clearAbsent(r, c)}
@@ -631,20 +684,20 @@ export function JournalGrid({
 
       {picker && canEdit && (
         <GradePicker
+          /* key — чтобы при переходе на другую клетку окно пересоздалось
+             с типом и комментарием ЭТОЙ клетки, а не предыдущей */
+          key={`${picker.row}-${picker.col}`}
           x={picker.x}
           y={picker.y}
           grades={gradesAt(picker.row, picker.col)}
           absent={isAbsent(picker.row, picker.col)}
-          onPick={(value, slot, kind, comment) => {
-            commitGrade(picker.row, picker.col, value, slot, kind, comment);
-            setPicker(null);
-            focusCell(picker.row, picker.col);
-          }}
-          onRemove={(slot) => {
-            removeGrade(picker.row, picker.col, slot);
-            setPicker(null);
-            focusCell(picker.row, picker.col);
-          }}
+          studentName={rows[picker.row]?.name ?? ""}
+          /* Окно НЕ закрывается: после цифры учитель дописывает «за что» и комментарий */
+          onPick={(value, slot, kind, comment) =>
+            commitGrade(picker.row, picker.col, value, slot, kind, comment)
+          }
+          onUpdateMeta={(kind, comment) => updateCellMeta(picker.row, picker.col, kind, comment)}
+          onRemove={(slot) => removeGrade(picker.row, picker.col, slot)}
           onAbsent={() => {
             markAbsent(picker.row, picker.col);
             setPicker(null);
@@ -655,7 +708,10 @@ export function JournalGrid({
             setPicker(null);
             focusCell(picker.row, picker.col);
           }}
-          onClose={() => setPicker(null)}
+          onClose={() => {
+            setPicker(null);
+            focusCell(picker.row, picker.col);
+          }}
         />
       )}
 
@@ -723,6 +779,7 @@ function MobileLessonBoard({
   isAbsent,
   rowStats,
   onPick,
+  onUpdateMeta,
   onRemove,
   onAbsent,
   onClearAbsent,
@@ -733,7 +790,8 @@ function MobileLessonBoard({
   gradesAt: (row: number, col: number) => GridGrade[];
   isAbsent: (row: number, col: number) => boolean;
   rowStats: { average: number | null; year: number | null }[];
-  onPick: (row: number, col: number, value: number, slot: number, kind: GradeKind) => void;
+  onPick: (row: number, col: number, value: number, slot: number, kind: GradeKind, comment?: string) => void;
+  onUpdateMeta: (row: number, col: number, kind: GradeKind, comment: string) => void;
   onRemove: (row: number, col: number, slot: number) => void;
   onAbsent: (row: number, col: number) => void;
   onClearAbsent: (row: number, col: number) => void;
@@ -741,6 +799,15 @@ function MobileLessonBoard({
   const [colIndex, setColIndex] = useState(() => Math.max(0, lessons.length - 1));
   const [openRow, setOpenRow] = useState<number | null>(null);
   const [kind, setKind] = useState<GradeKind>("regular");
+  const [comment, setComment] = useState("");
+
+  /** Открыть карточку ученика: подхватываем тип и комментарий его оценки. */
+  const openStudent = (rowIndex: number) => {
+    const grades = gradesAt(rowIndex, colIndex);
+    setKind(grades[0]?.kind ?? "regular");
+    setComment(grades[0]?.comment ?? "");
+    setOpenRow(rowIndex);
+  };
 
   const lesson = lessons[Math.min(colIndex, lessons.length - 1)];
   if (!lesson) return null;
@@ -793,7 +860,7 @@ function MobileLessonBoard({
 
                 <button
                   type="button"
-                  onClick={() => canEdit && setOpenRow(isOpen ? null : rowIndex)}
+                  onClick={() => canEdit && (isOpen ? setOpenRow(null) : openStudent(rowIndex))}
                   disabled={!canEdit}
                   aria-expanded={isOpen}
                   className={cn(
@@ -828,13 +895,16 @@ function MobileLessonBoard({
 
               {isOpen && canEdit && (
                 <div className="animate-fade-in space-y-3 border-t border-rule bg-secondary/40 p-2.5">
-                  {/* Тип работы для выставляемой оценки */}
+                  {/* Тип работы: если оценка уже стоит — правится сразу */}
                   <div className="flex flex-wrap gap-1.5">
                     {GRADE_KIND_KEYS.map((k) => (
                       <button
                         key={k}
                         type="button"
-                        onClick={() => setKind(k)}
+                        onClick={() => {
+                          setKind(k);
+                          if (grades.length > 0) onUpdateMeta(rowIndex, colIndex, k, comment);
+                        }}
                         className={cn(
                           "focus-ring rounded-full px-3 py-1 text-xs font-medium",
                           kind === k
@@ -843,6 +913,11 @@ function MobileLessonBoard({
                         )}
                       >
                         {GRADE_KINDS[k].label}
+                        {GRADE_KINDS[k].weight > 1 && (
+                          <span className="ml-1 tabular-nums opacity-70">
+                            ×{GRADE_KINDS[k].weight}
+                          </span>
+                        )}
                       </button>
                     ))}
                   </div>
@@ -860,10 +935,7 @@ function MobileLessonBoard({
                               key={grade}
                               type="button"
                               disabled={disabled}
-                              onClick={() => {
-                                onPick(rowIndex, colIndex, grade, slot, kind);
-                                if (slot > 0) setOpenRow(null);
-                              }}
+                              onClick={() => onPick(rowIndex, colIndex, grade, slot, kind, comment)}
                               className={cn(
                                 "focus-ring h-11 rounded-md text-base font-bold tabular-nums disabled:cursor-not-allowed",
                                 gradeColorClasses(grade),
@@ -891,6 +963,19 @@ function MobileLessonBoard({
                     );
                   })}
 
+                  {/* Комментарий: сохраняется при потере фокуса и по кнопке «Готово» */}
+                  <input
+                    type="text"
+                    value={comment}
+                    onChange={(event) => setComment(event.target.value)}
+                    onBlur={() => {
+                      if (grades.length > 0) onUpdateMeta(rowIndex, colIndex, kind, comment);
+                    }}
+                    placeholder="Комментарий ученику"
+                    maxLength={300}
+                    className="focus-ring h-11 w-full rounded-md border border-input bg-card px-3 text-sm text-foreground placeholder:text-muted-foreground"
+                  />
+
                   {/* Отметка отсутствия */}
                   <button
                     type="button"
@@ -908,6 +993,17 @@ function MobileLessonBoard({
                   >
                     <UserX className="h-4 w-4" aria-hidden />
                     {absent ? "Снять «Н» (был на уроке)" : "Отметить «Н» (отсутствовал)"}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (grades.length > 0) onUpdateMeta(rowIndex, colIndex, kind, comment);
+                      setOpenRow(null);
+                    }}
+                    className="focus-ring flex h-10 w-full items-center justify-center rounded-md bg-secondary text-sm font-semibold"
+                  >
+                    Готово
                   </button>
                 </div>
               )}
@@ -937,13 +1033,22 @@ function EmptyBoard({
   );
 }
 
-/** Окно выбора: тип работы, цифры (две позиции), комментарий, «Н». */
+/**
+ * Окно выбора: цифры (две позиции), тип работы, комментарий, «Н».
+ *
+ * Важно: клик по цифре НЕ закрывает окно. Оценка сохраняется сразу, а «за что»
+ * и комментарий учитель дописывает следом — они долетают до уже сохранённой
+ * оценки через onUpdateMeta. Пока цифры нет, тип и комментарий ждут в состоянии
+ * окна и уходят на сервер вместе с первой же цифрой.
+ */
 function GradePicker({
   x,
   y,
   grades,
   absent,
+  studentName,
   onPick,
+  onUpdateMeta,
   onRemove,
   onAbsent,
   onClearAbsent,
@@ -953,7 +1058,9 @@ function GradePicker({
   y: number;
   grades: GridGrade[];
   absent: boolean;
+  studentName: string;
   onPick: (value: number, slot: number, kind: GradeKind, comment?: string) => void;
+  onUpdateMeta: (kind: GradeKind, comment: string) => void;
   onRemove: (slot: number) => void;
   onAbsent: () => void;
   onClearAbsent: () => void;
@@ -965,31 +1072,55 @@ function GradePicker({
   const [kind, setKind] = useState<GradeKind>(grades[0]?.kind ?? "regular");
   const [comment, setComment] = useState(grades[0]?.comment ?? "");
 
+  /* Свежие значения для обработчиков закрытия: слушатели окна вешаются один
+     раз, а комментарий к моменту закрытия уже другой. */
+  const draft = useRef({ kind, comment, hasGrades: grades.length > 0 });
+  draft.current = { kind, comment, hasGrades: grades.length > 0 };
+
+  /** Досохранить тип и комментарий у уже выставленной оценки. */
+  const commitMeta = useCallback(() => {
+    const { kind: currentKind, comment: currentComment, hasGrades } = draft.current;
+    if (hasGrades) onUpdateMeta(currentKind, currentComment);
+  }, [onUpdateMeta]);
+
   useEffect(() => setMounted(true), []);
 
   useEffect(() => {
+    /* Закрытие любым способом сначала досохраняет комментарий: учитель мог
+       напечатать текст и просто кликнуть мимо окна. */
+    function finish() {
+      commitMeta();
+      onClose();
+    }
     function handlePointerDown(event: MouseEvent) {
-      if (ref.current && !ref.current.contains(event.target as Node)) onClose();
+      if (ref.current && !ref.current.contains(event.target as Node)) finish();
     }
     function handleKey(event: KeyboardEvent) {
-      if (event.key === "Escape") onClose();
+      if (event.key === "Escape") finish();
     }
     document.addEventListener("mousedown", handlePointerDown);
     document.addEventListener("keydown", handleKey);
-    window.addEventListener("scroll", onClose, true);
-    window.addEventListener("resize", onClose);
+    window.addEventListener("scroll", finish, true);
+    window.addEventListener("resize", finish);
     return () => {
       document.removeEventListener("mousedown", handlePointerDown);
       document.removeEventListener("keydown", handleKey);
-      window.removeEventListener("scroll", onClose, true);
-      window.removeEventListener("resize", onClose);
+      window.removeEventListener("scroll", finish, true);
+      window.removeEventListener("resize", finish);
     };
-  }, [onClose]);
+  }, [commitMeta, onClose]);
 
   if (!mounted) return null;
 
+  const saved = grades.length > 0;
   const left = Math.min(Math.max(x, 150), window.innerWidth - 150);
-  const top = Math.min(y, window.innerHeight - 330);
+  const top = Math.max(8, Math.min(y, window.innerHeight - 400));
+
+  /** Смена типа: если цифра уже стоит — правим сохранённую оценку немедленно. */
+  const pickKind = (next: GradeKind) => {
+    setKind(next);
+    if (saved) onUpdateMeta(next, comment);
+  };
 
   const digits = (slot: number) => (
     <div className="grid grid-cols-5 gap-1">
@@ -1015,38 +1146,24 @@ function GradePicker({
       ref={ref}
       role="dialog"
       aria-label="Выбор оценки"
-      className="animate-pop-in fixed z-50 w-[15.5rem] -translate-x-1/2 rounded-lg border border-rule-strong bg-card p-2.5 shadow-lg"
+      className="animate-pop-in fixed z-50 w-[16.5rem] -translate-x-1/2 rounded-lg border border-rule-strong bg-card p-2.5 shadow-lg"
       style={{ left, top }}
     >
-      {/* Тип работы */}
-      <div className="mb-2 flex flex-wrap gap-1">
-        {GRADE_KIND_KEYS.map((k) => (
-          <button
-            key={k}
-            type="button"
-            onClick={() => setKind(k)}
-            className={cn(
-              "focus-ring rounded-full px-2 py-0.5 text-[11px] font-medium",
-              kind === k
-                ? "bg-primary text-primary-foreground"
-                : "bg-secondary text-muted-foreground hover:text-foreground",
-            )}
-            title={GRADE_KINDS[k].weight > 1 ? "Весит больше в среднем балле" : undefined}
-          >
-            {GRADE_KINDS[k].label}
-          </button>
-        ))}
-      </div>
+      {studentName && (
+        <p className="mb-1.5 truncate text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+          {shortName(studentName)}
+        </p>
+      )}
 
       {digits(0)}
 
-      {grades[0] !== undefined && !showSecond && (
+      {saved && !showSecond && (
         <button
           type="button"
           onClick={() => setShowSecond(true)}
           className="focus-ring mt-1.5 w-full rounded px-2 py-1 text-xs font-medium text-primary hover:bg-primary/10"
         >
-          + вторая оценка за урок
+          + вторая оценка за урок («10/9»)
         </button>
       )}
 
@@ -1059,17 +1176,63 @@ function GradePicker({
         </div>
       )}
 
+      {/* Тип работы — ПОД цифрами: сначала оценка, потом уточняем, за что она */}
+      <div className="mt-2 border-t border-rule pt-2">
+        <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+          За что
+        </p>
+        <div className="flex flex-wrap gap-1">
+          {GRADE_KIND_KEYS.map((k) => (
+            <button
+              key={k}
+              type="button"
+              onClick={() => pickKind(k)}
+              className={cn(
+                "focus-ring rounded-full px-2 py-0.5 text-[11px] font-medium transition-colors",
+                kind === k
+                  ? "bg-primary text-primary-foreground"
+                  : "bg-secondary text-muted-foreground hover:text-foreground",
+              )}
+              title={
+                GRADE_KINDS[k].weight > 1
+                  ? `Считается как ${GRADE_KINDS[k].weight} оценки в среднем балле`
+                  : "Обычный вес в среднем балле"
+              }
+            >
+              {GRADE_KINDS[k].label}
+              {GRADE_KINDS[k].weight > 1 && (
+                <span className="ml-1 tabular-nums opacity-70">×{GRADE_KINDS[k].weight}</span>
+              )}
+            </button>
+          ))}
+        </div>
+      </div>
+
       <input
         type="text"
         value={comment}
         onChange={(event) => setComment(event.target.value)}
-        placeholder="Комментарий (за что)"
+        onBlur={commitMeta}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") {
+            event.preventDefault();
+            commitMeta();
+            onClose();
+          }
+        }}
+        placeholder="Комментарий ученику"
         maxLength={300}
         className="focus-ring mt-2 h-8 w-full rounded-md border border-input bg-card px-2 text-xs text-foreground placeholder:text-muted-foreground"
       />
 
+      <p className="mt-1 text-[10px] leading-tight text-muted-foreground">
+        {saved
+          ? "Тип и комментарий сохраняются сразу — окно можно просто закрыть."
+          : "Поставьте оценку — тип и комментарий сохранятся вместе с ней."}
+      </p>
+
       <div className="mt-2 flex items-center gap-1.5 border-t border-rule pt-2">
-        {grades.length > 0 && (
+        {saved && (
           <button
             type="button"
             onClick={() => onRemove(grades.length - 1)}
@@ -1091,6 +1254,16 @@ function GradePicker({
         >
           <UserX className="h-3.5 w-3.5" aria-hidden />
           {absent ? "Был" : "Н (нет)"}
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            commitMeta();
+            onClose();
+          }}
+          className="focus-ring flex flex-1 items-center justify-center rounded bg-secondary px-2 py-1.5 text-xs font-semibold hover:bg-accent"
+        >
+          Готово
         </button>
       </div>
     </div>,

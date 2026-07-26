@@ -1,13 +1,21 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 
+import { HomeworkSection, PlannedAheadSection } from "@/components/agenda";
+import { GradeChip } from "@/components/grade-chip";
 import { QuarterLegend, QuarterSparkline } from "@/components/sparkline";
 import { StudentReportView } from "@/components/student-report";
 import { requirePageRole } from "@/lib/auth-guards";
-import { averageColorClasses, displayQuarter, formatAverage, gradeColorClasses } from "@/lib/grades";
-import { getRecentGrades, getStudentReport } from "@/lib/queries";
+import {
+  asGradeKind,
+  averageColorClasses,
+  displayQuarter,
+  formatAverage,
+  GRADE_KINDS,
+} from "@/lib/grades";
+import { getRecentGrades, getStudentAgenda, getStudentReport } from "@/lib/queries";
 import { formatYear, getActiveYear } from "@/lib/school-year";
-import { cn, formatDateShort } from "@/lib/utils";
+import { cn, formatDateShort, todayUtcMidnight } from "@/lib/utils";
 
 export const metadata: Metadata = { title: "Мой дневник" };
 
@@ -16,10 +24,12 @@ export default async function StudentPage() {
   const user = await requirePageRole(["STUDENT"]);
   const year = await getActiveYear();
 
-  const [report, recent] = await Promise.all([
+  const [report, recent, agenda] = await Promise.all([
     getStudentReport(user.id, user, year),
     getRecentGrades(user.id, year),
+    getStudentAgenda(year),
   ]);
+  const today = todayUtcMidnight();
 
   if (!report) {
     return (
@@ -76,6 +86,10 @@ export default async function StudentPage() {
         </dl>
       </header>
 
+      {/* Планы ближайших двух недель: контрольные и домашние задания */}
+      <PlannedAheadSection items={agenda.planned} today={today} />
+      <HomeworkSection items={agenda.homework} inUse={agenda.homeworkInUse} today={today} />
+
       {report.totalGrades > 0 && (
         <section className="rounded-lg border border-rule-strong bg-card p-4">
           <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-muted-foreground">
@@ -102,37 +116,36 @@ export default async function StudentPage() {
           </p>
         ) : (
           <ul className="divide-y divide-rule overflow-hidden rounded-lg border border-rule-strong bg-card">
-            {recent.map((grade) => (
-              <li key={grade.id}>
-                <Link
-                  href={`/student/subject/${grade.subject.id}`}
-                  className="focus-ring flex items-center gap-3 px-3 py-2 hover:bg-primary/[0.05]"
-                >
-                  <span
-                    className={cn(
-                      "flex h-8 w-9 shrink-0 items-center justify-center rounded text-[15px] font-bold tabular-nums",
-                      gradeColorClasses(grade.value),
-                    )}
+            {recent.map((grade) => {
+              const kind = asGradeKind(grade.kind);
+              return (
+                /* Чип — вне ссылки: у чипа с комментарием собственный попап,
+                   и кнопка внутри ссылки была бы невалидной и конфликтной */
+                <li key={grade.id} className="flex items-center gap-3 px-3 py-2 hover:bg-primary/[0.05]">
+                  <GradeChip value={grade.value} kind={kind} comment={grade.comment} />
+                  <Link
+                    href={`/student/subject/${grade.subject.id}`}
+                    className="focus-ring flex min-w-0 flex-1 items-center gap-3 rounded"
                   >
-                    {grade.value}
-                  </span>
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate text-sm font-medium">
-                      {grade.subject.name}
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-sm font-medium">
+                        {grade.subject.name}
+                      </span>
+                      <span className="block truncate text-xs text-muted-foreground">
+                        {formatDateShort(grade.lesson.date)} · {grade.quarter} четверть
+                        {grade.lesson.topic ? ` · ${grade.lesson.topic}` : ""}
+                        {kind !== "regular" ? ` · ${GRADE_KINDS[kind].label}` : ""}
+                      </span>
                     </span>
-                    <span className="block truncate text-xs text-muted-foreground">
-                      {formatDateShort(grade.lesson.date)} · {grade.quarter} четверть
-                      {grade.lesson.topic ? ` · ${grade.lesson.topic}` : ""}
-                    </span>
-                  </span>
-                  {grade.teacher && (
-                    <span className="hidden shrink-0 text-xs text-muted-foreground sm:block">
-                      {grade.teacher.name}
-                    </span>
-                  )}
-                </Link>
-              </li>
-            ))}
+                    {grade.teacher && (
+                      <span className="hidden shrink-0 text-xs text-muted-foreground sm:block">
+                        {grade.teacher.name}
+                      </span>
+                    )}
+                  </Link>
+                </li>
+              );
+            })}
           </ul>
         )}
       </section>

@@ -12,10 +12,20 @@ import {
   QUARTERS,
   QUARTER_LABELS,
 } from "@/lib/grades";
+import { GradeChip } from "@/components/grade-chip";
 import { QuarterSparkline } from "@/components/sparkline";
+import { Badge } from "@/components/ui/badge";
 import { getStudentSubjectDetail } from "@/lib/queries";
 import { formatYear, getActiveYear } from "@/lib/school-year";
-import { cn, formatDateLong } from "@/lib/utils";
+import {
+  addUtcDays,
+  cn,
+  formatDateLong,
+  formatDateShort,
+  formatWeekdayShort,
+  pluralize,
+  todayUtcMidnight,
+} from "@/lib/utils";
 
 export const metadata: Metadata = { title: "Оценки по предмету" };
 
@@ -42,6 +52,21 @@ export default async function StudentSubjectPage({
 
   const backHref =
     viewer.role === "STUDENT" ? "/student" : `/journal/students/${detail.student.id}`;
+
+  /**
+   * «Впереди»: до 5 будущих уроков ближайших двух недель, у которых есть хоть
+   * что-то из {тема, домашка, пометка работы}. Голые будущие уроки сетки не
+   * показываются нигде — только строка «запланировано ещё N уроков».
+   */
+  const today = todayUtcMidnight();
+  const upcomingHorizon = addUtcDays(today, 15);
+  const upcomingShown = detail.upcoming
+    .filter(
+      (row) =>
+        row.date < upcomingHorizon && (row.topic || row.homework || row.plannedKind),
+    )
+    .slice(0, 5);
+  const upcomingRest = detail.upcoming.length - upcomingShown.length;
 
   return (
     <div className="mx-auto max-w-3xl space-y-5">
@@ -97,6 +122,46 @@ export default async function StudentSubjectPage({
         </dl>
       </header>
 
+      {/* Впереди: аннотированные будущие уроки — к чему готовиться */}
+      {upcomingShown.length > 0 && (
+        <section>
+          <h2 className="mb-2 px-1 text-sm font-semibold uppercase tracking-wide text-muted-foreground">
+            Впереди
+          </h2>
+          <ul className="divide-y divide-rule overflow-hidden rounded-lg border border-rule-strong bg-card">
+            {upcomingShown.map((row) => (
+              <li key={row.lessonId} className="px-3 py-2.5">
+                <div className="flex items-center gap-3">
+                  <span className="w-20 shrink-0 text-xs tabular-nums text-muted-foreground">
+                    {formatWeekdayShort(row.date)} {formatDateShort(row.date)}
+                  </span>
+                  {row.plannedKind && (
+                    <Badge tone="warning" className="shrink-0">
+                      {GRADE_KINDS[row.plannedKind].label}
+                    </Badge>
+                  )}
+                  <span className="min-w-0 flex-1 truncate text-sm">
+                    {row.topic ?? <span className="text-muted-foreground">тема не указана</span>}
+                  </span>
+                </div>
+                {/* Страница назначения — домашка полным текстом, без clamp */}
+                {row.homework && (
+                  <p className="mt-1 pl-[5.75rem] text-xs text-muted-foreground">
+                    Задано: {row.homework}
+                  </p>
+                )}
+              </li>
+            ))}
+            {upcomingRest > 0 && (
+              <li className="px-3 py-2 text-xs text-muted-foreground">
+                запланировано ещё {upcomingRest}{" "}
+                {pluralize(upcomingRest, "урок", "урока", "уроков")} до конца четверти
+              </li>
+            )}
+          </ul>
+        </section>
+      )}
+
       {detail.totalGrades > 0 && (
         <section className="rounded-lg border border-rule-strong bg-card p-4">
           <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-muted-foreground">
@@ -140,24 +205,26 @@ export default async function StudentSubjectPage({
                   </span>
                   <span className="min-w-0 flex-1 text-sm">
                     {row.topic ?? <span className="text-muted-foreground">тема не указана</span>}
-                    {/* Тип и комментарий к оценкам — за что она поставлена */}
-                    {row.grades.some((g) => g.kind !== "regular" || g.comment) && (
+                    {/* Домашка видна всегда, даже при «Н»: отсутствовавшему
+                        задание особенно нужно */}
+                    {row.homework && (
                       <span className="mt-0.5 block text-xs text-muted-foreground">
-                        {row.grades
-                          .map((g) =>
-                            [
-                              g.kind !== "regular" ? GRADE_KINDS[g.kind].label : null,
-                              g.comment,
-                            ]
-                              .filter(Boolean)
-                              .join(" · "),
-                          )
-                          .filter(Boolean)
-                          .join(" | ")}
+                        Задано: {row.homework}
                       </span>
                     )}
                   </span>
                   <span className="flex shrink-0 items-center gap-1">
+                    {/* Тип — один на клетку: у «10/9» он общий для обеих оценок */}
+                    {!row.absent &&
+                      row.grades.length > 0 &&
+                      row.grades[0]!.kind !== "regular" && (
+                        <span
+                          className="text-[10px] font-semibold uppercase text-muted-foreground"
+                          title={GRADE_KINDS[row.grades[0]!.kind].label}
+                        >
+                          {GRADE_KINDS[row.grades[0]!.kind].short}
+                        </span>
+                      )}
                     {row.absent ? (
                       <span
                         className="flex h-8 w-9 items-center justify-center rounded bg-slate-200 text-[15px] font-bold text-slate-600 dark:bg-slate-700 dark:text-slate-200"
@@ -169,16 +236,12 @@ export default async function StudentSubjectPage({
                       <span className="text-xs text-muted-foreground">без оценки</span>
                     ) : (
                       row.grades.map((grade, index) => (
-                        <span
+                        <GradeChip
                           key={index}
-                          className={cn(
-                            "flex h-8 w-9 items-center justify-center rounded text-[15px] font-bold tabular-nums",
-                            gradeColorClasses(grade.value),
-                          )}
-                          title={GRADE_KINDS[grade.kind].label}
-                        >
-                          {grade.value}
-                        </span>
+                          value={grade.value}
+                          kind={grade.kind}
+                          comment={grade.comment}
+                        />
                       ))
                     )}
                   </span>

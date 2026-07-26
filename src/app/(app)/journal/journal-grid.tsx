@@ -125,6 +125,10 @@ export type GridRow = {
   assessment: Assessment;
   /** Есть ли у ученика привязанный родитель — для трёх состояний попапа. */
   hasFamily: boolean;
+  /** Светофор «требует внимания»: ok — тишина, watch/act — точка у ФИО. */
+  attention: "ok" | "watch" | "act";
+  /** Формулировки сигналов для тултипа точки (собирает страница). */
+  attentionTitle: string;
   cells: Record<string, GridGrade[]>;
   /** lessonId -> уровень освоения (безотметочные 1–2 классы). */
   mastery: Record<string, GridMastery>;
@@ -1205,6 +1209,20 @@ export function JournalGrid({
                     title="Открыть карточку ученика — оценки по всем предметам"
                   >
                     <span className="flex min-w-0 items-center gap-1.5">
+                      {/* Светофор «требует внимания»: точка только на watch/act —
+                          спокойствие остаётся типографской нормой (DESIGN.md) */}
+                      {row.attention !== "ok" && (
+                        <span
+                          title={row.attentionTitle}
+                          aria-label={`Требует внимания: ${row.attentionTitle}`}
+                          className={cn(
+                            "inline-block h-2 w-2 shrink-0 rounded-full",
+                            row.attention === "act"
+                              ? "bg-destructive"
+                              : "bg-amber-500 dark:bg-amber-400",
+                          )}
+                        />
+                      )}
                       <span className="truncate">{row.name}</span>
                       {isAskCandidate && (
                         <span className="inline-block shrink-0 -rotate-2 rounded border border-primary/60 px-1 text-[10px] font-semibold uppercase tracking-wide text-primary">

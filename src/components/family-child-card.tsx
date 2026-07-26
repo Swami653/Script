@@ -1,6 +1,7 @@
 import { Award, ChevronRight } from "lucide-react";
 import Link from "next/link";
 
+import { AttentionStatus, SignalList } from "@/components/attention";
 import { GradeChip } from "@/components/grade-chip";
 import { LevelChip } from "@/components/level-chip";
 import { QuarterSparkline } from "@/components/sparkline";
@@ -8,23 +9,17 @@ import { StampSealMini } from "@/components/stamp-seal";
 import { stampLabel } from "@/lib/gradeless";
 import { averageColorClasses, formatAverage } from "@/lib/grades";
 import type { FamilyChildCard as CardData } from "@/lib/queries";
-import { cn, formatDateShort, pluralize } from "@/lib/utils";
+import { cn, firstNameOf, formatDateShort, pluralize } from "@/lib/utils";
 
 /**
  * Карточка ребёнка на /family. Два шаблона по assessment:
  *  * 3–4 класс — «что нового», свежие оценки чипами, средний + спарклайн;
  *  * 1–2 класс — ни одной цифры-оценки: печати, уровни, характеристика,
  *    посещаемость и текст «Оценок в 1–2 классах не ставят — так задумано».
- * Блок сигналов «Обратите внимание» передаётся снаружи (attention) —
- * карточка не знает о правилах, только рисует.
+ * Сигналы приходят уже отфильтрованными родительской витриной
+ * (без silence, ≤2) — карточка только рисует.
  */
-export function FamilyChildCard({
-  card,
-  attention,
-}: {
-  card: CardData;
-  attention?: React.ReactNode;
-}) {
+export function FamilyChildCard({ card }: { card: CardData }) {
   const gradeless = card.assessment === "gradeless";
   const newTotal = gradeless
     ? card.newStamps + card.newMastery + card.newAbsences
@@ -41,6 +36,7 @@ export function FamilyChildCard({
             {gradeless && " · безотметочное обучение"}
           </p>
         </div>
+        <AttentionStatus level={card.level} />
         {gradeless ? (
           <p className="flex items-center gap-1.5 text-sm font-semibold tabular-nums text-primary">
             <StampSealMini kind={null} seed={card.student.id} />
@@ -147,7 +143,17 @@ export function FamilyChildCard({
           )
         )}
 
-        {attention}
+        {card.signals.length > 0 ? (
+          <SignalList
+            signals={card.signals}
+            tone="parent"
+            childFirstName={firstNameOf(card.student.name)}
+          />
+        ) : (
+          <p className="text-xs text-muted-foreground">
+            За последние две недели поводов для беспокойства нет.
+          </p>
+        )}
       </div>
 
       <footer className="border-t border-rule px-4 py-2.5">

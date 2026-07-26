@@ -4,6 +4,7 @@ import Link from "next/link";
 
 import { JournalGrid, type GridMode } from "@/app/(app)/journal/journal-grid";
 import { JournalToolbar } from "@/app/(app)/journal/journal-toolbar";
+import { signalTextTeacher } from "@/components/attention";
 import { ClosedStamp } from "@/components/closed-stamp";
 import { requirePageRole } from "@/lib/auth-guards";
 import {
@@ -253,6 +254,8 @@ export default async function JournalPage({ searchParams }: { searchParams: Sear
           className: row.student.className,
           assessment: row.assessment,
           hasFamily: row.hasFamily,
+          attention: row.attention,
+          attentionTitle: row.signals.map(signalTextTeacher).join("; "),
           cells: Object.fromEntries(
             Object.entries(row.cells).map(([lessonId, grades]) => [
               lessonId,

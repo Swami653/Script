@@ -95,6 +95,16 @@ export function shortName(name: string): string {
   return initialLetters ? `${surname} ${initialLetters}` : surname;
 }
 
+/**
+ * Имя без фамилии: «Иванова Мария Петровна» → «Мария» (второй токен ФИО,
+ * иначе первый). Для родительских формулировок и Telegram-дайджестов,
+ * куда фамилия не уходит никогда.
+ */
+export function firstNameOf(name: string): string {
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  return parts[1] ?? parts[0] ?? "";
+}
+
 /** "Иванов Иван Иванович" -> "ИИ" */
 export function initials(name: string): string {
   const parts = name.trim().split(/\s+/).filter(Boolean);

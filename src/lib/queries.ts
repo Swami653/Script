@@ -27,6 +27,16 @@ import {
   type Quarter,
 } from "@/lib/grades";
 import { prisma } from "@/lib/prisma";
+import { periodContains } from "@/lib/quarters";
+import {
+  detectSignals,
+  parentVisibleSignals,
+  SIGNAL_RULES,
+  signalLevel,
+  signalSeverity,
+  type Signal,
+  type SignalLevel,
+} from "@/lib/signals";
 import {
   addUtcDays,
   diffUtcDays,
@@ -97,6 +107,10 @@ export type JournalRow = {
    * штампа читается как «семейный доступ не подключён», а не «семья игнорирует».
    */
   hasFamily: boolean;
+  /** Уровень «требует внимания» (сигналы не хранятся — считаются при рендере). */
+  attention: SignalLevel;
+  /** Сигналы строки — формулировки для попапа/тултипа учителя. */
+  signals: Signal[];
   /** lessonId -> оценки клетки, отсортированные по позиции */
   cells: Record<string, CellGrade[]>;
   /** lessonId -> уровень освоения клетки (безотметочные 1–2 классы). */
@@ -277,6 +291,12 @@ export async function getJournalData(
   }
   const withFamily = new Set(familyLinks.map((link) => link.studentId));
 
+  // Светофор «требует внимания» — одна обёртка на все витрины.
+  const signalMap = await getSignalsForStudents(
+    students.map((student) => student.id),
+    year,
+  );
+
   const cellsByStudent = new Map<string, Record<string, CellGrade[]>>();
   for (const grade of gradesOfQuarter) {
     const cells = cellsByStudent.get(grade.studentId) ?? {};
@@ -354,6 +374,8 @@ export async function getJournalData(
       student: { id: student.id, name: student.name, className: student.className },
       assessment: assessmentOf(student.className),
       hasFamily: withFamily.has(student.id),
+      attention: signalMap.get(student.id)?.level ?? "ok",
+      signals: signalMap.get(student.id)?.signals ?? [],
       cells,
       mastery: masteryByStudent.get(student.id) ?? {},
       stamps: stampsByStudent.get(student.id) ?? {},
@@ -1139,6 +1161,120 @@ export async function getParentsOverview(): Promise<ParentRow[]> {
   });
 }
 
+/* ── Сигналы «требует внимания» ───────────────────────────────────────────── */
+
+/**
+ * ОДНА обёртка сигналов на все три витрины (журнал, семейные карточки,
+ * /admin/attention): оценки года, «Н» за 30 дней и границы четвертей —
+ * тремя батч-запросами, дальше чистый движок detectSignals. Сигналы нигде
+ * не хранятся и не экспортируются.
+ */
+export async function getSignalsForStudents(
+  studentIds: string[],
+  year: number,
+  today: Date = todayUtcMidnight(),
+): Promise<Map<string, { level: SignalLevel; signals: Signal[] }>> {
+  const result = new Map<string, { level: SignalLevel; signals: Signal[] }>();
+  if (studentIds.length === 0) return result;
+
+  const absencesFrom = addUtcDays(today, -SIGNAL_RULES.absences.windowDays);
+  const [grades, absences, periods] = await Promise.all([
+    prisma.grade.findMany({
+      where: { studentId: { in: studentIds }, year, lesson: LIVE_LESSON },
+      select: {
+        studentId: true,
+        value: true,
+        subjectId: true,
+        subject: { select: { name: true } },
+        lesson: { select: { date: true } },
+      },
+    }),
+    prisma.absence.findMany({
+      where: {
+        studentId: { in: studentIds },
+        year,
+        lesson: { deletedAt: null, date: { gte: absencesFrom } },
+      },
+      select: { studentId: true, lesson: { select: { date: true } } },
+    }),
+    prisma.quarterPeriod.findMany({
+      where: { year },
+      select: { quarter: true, startDate: true, endDate: true },
+    }),
+  ]);
+
+  // Начало ТЕКУЩЕЙ четверти; сегодня вне всех периодов — каникулы (null),
+  // и движок сам оставляет активным только правило посещаемости.
+  const currentPeriod = periods.find((period) => periodContains(period, today)) ?? null;
+  const quarterStart = currentPeriod?.startDate ?? null;
+
+  const gradesByStudent = new Map<string, SignalInputGrades>();
+  for (const grade of grades) {
+    const list = gradesByStudent.get(grade.studentId) ?? [];
+    list.push({
+      value: grade.value,
+      date: grade.lesson.date,
+      subjectId: grade.subjectId,
+      subjectName: grade.subject.name,
+    });
+    gradesByStudent.set(grade.studentId, list);
+  }
+  const absencesByStudent = new Map<string, { date: Date }[]>();
+  for (const absence of absences) {
+    const list = absencesByStudent.get(absence.studentId) ?? [];
+    list.push({ date: absence.lesson.date });
+    absencesByStudent.set(absence.studentId, list);
+  }
+
+  for (const studentId of studentIds) {
+    const own = gradesByStudent.get(studentId) ?? [];
+    const signals = detectSignals({
+      today,
+      quarterStart,
+      grades: own,
+      absences: absencesByStudent.get(studentId) ?? [],
+      hasAnyGradeThisYear: own.length > 0,
+    });
+    result.set(studentId, { level: signalLevel(signals), signals });
+  }
+  return result;
+}
+
+type SignalInputGrades = { value: number; date: Date; subjectId: string; subjectName: string }[];
+
+/** Для /admin/attention: только watch/act, act — первыми. */
+export async function getAttentionList(year: number): Promise<
+  {
+    student: { id: string; name: string; className: string | null };
+    level: SignalLevel;
+    signals: Signal[];
+  }[]
+> {
+  const students = await getStudents();
+  const signalMap = await getSignalsForStudents(
+    students.map((student) => student.id),
+    year,
+  );
+
+  return students
+    .map((student) => {
+      const entry = signalMap.get(student.id) ?? { level: "ok" as const, signals: [] };
+      return {
+        student: { id: student.id, name: student.name, className: student.className },
+        level: entry.level,
+        signals: [...entry.signals].sort(
+          (a, b) =>
+            (signalSeverity(a) === "act" ? 0 : 1) - (signalSeverity(b) === "act" ? 0 : 1),
+        ),
+      };
+    })
+    .filter((row) => row.level !== "ok")
+    .sort((a, b) => {
+      if (a.level !== b.level) return a.level === "act" ? -1 : 1;
+      return a.student.name.localeCompare(b.student.name, "ru");
+    });
+}
+
 /* ── Семейный экран (родитель) ────────────────────────────────────────────── */
 
 /** Окно «что нового» для родителя, который ещё не открывал дневник: 14 дней. */
@@ -1183,6 +1319,9 @@ export type FamilyChildCard = {
   stampsYearTotal: number;
   /** Характеристика показываемой четверти (безотметочные 1–2 классы). */
   quarterNote: string | null;
+  /** Уровень «обратите внимание» и ≤2 родительских сигнала (без silence). */
+  level: SignalLevel;
+  signals: Signal[];
 };
 
 /**
@@ -1210,7 +1349,8 @@ export async function getFamilyOverview(
   const studentIds = links.map((link) => link.student.id);
 
   const monthAgo = addUtcDays(todayUtcMidnight(), -30);
-  const [grades, absences, acks, stamps, mastery, notes] = await Promise.all([
+  const [signalMap, grades, absences, acks, stamps, mastery, notes] = await Promise.all([
+    getSignalsForStudents(studentIds, year),
     prisma.grade.findMany({
       where: { studentId: { in: studentIds }, year, lesson: LIVE_LESSON },
       orderBy: [{ lesson: { date: "desc" } }, { slot: "asc" }],
@@ -1341,6 +1481,11 @@ export async function getFamilyOverview(
         totalAbsences: ownAbsences.length,
         stampsYearTotal: ownStamps.length,
         quarterNote: noteRow?.text ?? null,
+        // Родительская витрина: silence отфильтрован, максимум два сигнала.
+        // Уровень тоже пересчитывается ПО ВИДИМЫМ сигналам: карточка не должна
+        // тревожить «поговорите с учителем» из-за скрытого от семьи правила.
+        level: signalLevel(parentVisibleSignals(signalMap.get(student.id)?.signals ?? [])),
+        signals: parentVisibleSignals(signalMap.get(student.id)?.signals ?? []),
       };
     });
 }

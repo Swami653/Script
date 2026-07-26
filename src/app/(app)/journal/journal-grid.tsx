@@ -83,7 +83,7 @@ function shortName(name: string): string {
  * Журнал класса. Строки — ученики, столбцы — уроки, справа за чертой итоги.
  *
  * В клетке: до двух оценок («10/9»), либо отметка «Н» (отсутствие — в средний
- * балл не входит). У оценки есть тип (контрольная весит вдвое) и комментарий.
+ * балл не входит). У оценки есть тип («за что» она) и комментарий.
  *
  * Клавиатура (быстрый ввод текущих оценок):
  *   ← → ↑ ↓        — перемещение
@@ -527,7 +527,7 @@ export function JournalGrid({
               <th
                 scope="col"
                 className="w-24 border-b-2 border-l border-rule-strong bg-secondary/40 px-3 py-2 text-center align-bottom text-xs font-semibold uppercase tracking-wide text-muted-foreground"
-                title="Средний балл за четверть (контрольная весит больше)"
+                title="Средний балл за четверть"
               >
                 Средний
               </th>
@@ -758,7 +758,8 @@ function CellContent({
             title={`${GRADE_KINDS[grade.kind].label}${grade.comment ? ` — ${grade.comment}` : ""}`}
           >
             {grade.value}
-            {grade.weight > 1 && (
+            {/* Точка — визуальная пометка контрольной, к весу отношения не имеет */}
+            {grade.kind === "control" && (
               <span
                 aria-hidden
                 className="absolute bottom-0.5 h-[3px] w-[3px] rounded-full bg-current opacity-70"
@@ -913,11 +914,6 @@ function MobileLessonBoard({
                         )}
                       >
                         {GRADE_KINDS[k].label}
-                        {GRADE_KINDS[k].weight > 1 && (
-                          <span className="ml-1 tabular-nums opacity-70">
-                            ×{GRADE_KINDS[k].weight}
-                          </span>
-                        )}
                       </button>
                     ))}
                   </div>
@@ -1193,16 +1189,8 @@ function GradePicker({
                   ? "bg-primary text-primary-foreground"
                   : "bg-secondary text-muted-foreground hover:text-foreground",
               )}
-              title={
-                GRADE_KINDS[k].weight > 1
-                  ? `Считается как ${GRADE_KINDS[k].weight} оценки в среднем балле`
-                  : "Обычный вес в среднем балле"
-              }
             >
               {GRADE_KINDS[k].label}
-              {GRADE_KINDS[k].weight > 1 && (
-                <span className="ml-1 tabular-nums opacity-70">×{GRADE_KINDS[k].weight}</span>
-              )}
             </button>
           ))}
         </div>

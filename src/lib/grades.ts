@@ -28,15 +28,17 @@ export const MAX_GRADES_PER_LESSON = 2;
 export type Quarter = (typeof QUARTERS)[number];
 
 /**
- * Типы работ и их вес в среднем балле. Контрольная весит больше текущей оценки.
- * Вес денормализуется в Grade.weight на сервере, чтобы правка этой таблицы
- * не переписывала уже выставленные оценки.
+ * Типы работ — пометка «за что выставлена оценка». В средний балл ВСЕ типы
+ * входят с одинаковым весом 1, то есть средний — обычное арифметическое.
+ * Поле Grade.weight и функция weightedAverage оставлены как механизм на
+ * будущее: вес по-прежнему денормализуется при выставлении, а при равных
+ * весах взвешенная формула даёт то же обычное среднее.
  */
 export const GRADE_KINDS = {
   regular: { label: "Текущая", short: "Тек", weight: 1 },
   oral: { label: "Устный ответ", short: "Устн", weight: 1 },
   homework: { label: "Домашняя работа", short: "Дом", weight: 1 },
-  control: { label: "Контрольная", short: "КР", weight: 2 },
+  control: { label: "Контрольная", short: "КР", weight: 1 },
 } as const;
 
 export type GradeKind = keyof typeof GRADE_KINDS;
@@ -108,8 +110,9 @@ export function averageGrade(values: readonly number[]): number | null {
 
 /**
  * Взвешенный средний балл: sum(оценка × вес) / sum(вес), округление до сотых.
- * Контрольная (вес 2) влияет вдвое сильнее текущей оценки (вес 1).
- * Возвращает null, если оценок нет.
+ * Сейчас все веса равны 1, поэтому формула даёт обычное среднее арифметическое;
+ * механизм оставлен на случай возврата разных весов. Возвращает null, если
+ * оценок нет.
  */
 export function weightedAverage(
   items: readonly { value: number; weight: number }[],

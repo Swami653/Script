@@ -3,14 +3,9 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
-import {
-  shortName,
-  type GridGrade,
-  type GridLesson,
-  type GridRow,
-} from "@/app/(app)/journal/journal-grid";
+import type { GridGrade, GridLesson, GridRow } from "@/app/(app)/journal/journal-grid";
 import { gradeColorClasses } from "@/lib/grades";
-import { cn, formatDateShort } from "@/lib/utils";
+import { cn, formatDateShort, shortName } from "@/lib/utils";
 
 /**
  * Перекличка в одно касание. Дефолт «все здесь» — ноль записей в БД: чипы

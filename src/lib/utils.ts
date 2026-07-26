@@ -84,6 +84,17 @@ export function todayUtcMidnight(): Date {
   return parseDateInputValue(toDateInputValue(new Date()));
 }
 
+/** «Иванова Мария Петровна» -> «Иванова М. П.» — для узких экранов и панелей. */
+export function shortName(name: string): string {
+  const [surname, ...rest] = name.trim().split(/\s+/);
+  if (!surname) return name;
+  const initialLetters = rest
+    .slice(0, 2)
+    .map((part) => `${part[0]!.toUpperCase()}.`)
+    .join(" ");
+  return initialLetters ? `${surname} ${initialLetters}` : surname;
+}
+
 /** "Иванов Иван Иванович" -> "ИИ" */
 export function initials(name: string): string {
   const parts = name.trim().split(/\s+/).filter(Boolean);

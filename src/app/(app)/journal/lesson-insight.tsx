@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState, useTransition } from "react";
 import { createPortal } from "react-dom";
 
-import { shortName, type GridLesson } from "@/app/(app)/journal/journal-grid";
+import type { GridLesson } from "@/app/(app)/journal/journal-grid";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/field";
 import { setLessonHomeworkAction, setLessonPlanAction } from "@/lib/actions/lessons";
@@ -19,7 +19,7 @@ import {
   QUALITY_MIN_GRADE,
   type LessonAnalysis,
 } from "@/lib/grades";
-import { cn, formatDateShort } from "@/lib/utils";
+import { cn, formatDateShort, shortName } from "@/lib/utils";
 
 /**
  * Единая панель урока, открывается кликом по дате столбца (десктоп) или

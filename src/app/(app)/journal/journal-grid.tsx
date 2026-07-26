@@ -50,7 +50,7 @@ import {
   type GradeKind,
   type Quarter,
 } from "@/lib/grades";
-import { cn, formatDateLong, formatDateShort, todayUtcMidnight } from "@/lib/utils";
+import { cn, formatDateLong, formatDateShort, shortName, todayUtcMidnight } from "@/lib/utils";
 
 export type GridLesson = {
   id: string;
@@ -96,17 +96,6 @@ function cellKey(studentId: string, lessonId: string): string {
 
 function makeGrade(value: number, kind: GradeKind): GridGrade {
   return { value, weight: weightForKind(kind), kind, comment: null };
-}
-
-/** «Иванова Мария Петровна» -> «Иванова М. П.» — для узких экранов и панелей. */
-export function shortName(name: string): string {
-  const [surname, ...rest] = name.trim().split(/\s+/);
-  if (!surname) return name;
-  const initials = rest
-    .slice(0, 2)
-    .map((part) => `${part[0]!.toUpperCase()}.`)
-    .join(" ");
-  return initials ? `${surname} ${initials}` : surname;
 }
 
 /**

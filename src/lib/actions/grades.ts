@@ -1,6 +1,7 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
+import { after } from "next/server";
 import { z } from "zod";
 
 import { actionError, actionFail, actionOk, type ActionResult } from "@/lib/action-result";
@@ -8,6 +9,7 @@ import { lessonRef, logAudit } from "@/lib/audit";
 import { requireRole } from "@/lib/auth-guards";
 import { syncControlDebts } from "@/lib/debts";
 import { isGradelessClassName } from "@/lib/gradeless";
+import { drainNotifications } from "@/lib/telegram-notify";
 import {
   asGradeKind,
   GRADE_KINDS,
@@ -190,8 +192,32 @@ export async function setGradeAction(input: {
     // быть контрольной и т.п. — редьюсер приводит долги урока к инварианту.
     await syncControlDebts(lesson.id);
 
+    // Outbox уведомлений семье: только вставка строки, ни одного сетевого
+    // вызова на критическом пути учителя. Свой try/catch по контракту
+    // logAudit — сбой очереди НЕ роняет выставление оценки. Событие — лишь
+    // когда оценка новая или значение изменилось; комментария в снимке нет.
+    if (previousValue !== parsed.value) {
+      try {
+        await prisma.notificationEvent.create({
+          data: {
+            studentId: student.id,
+            studentName: student.name,
+            subjectName: lesson.subject.name,
+            lessonDate: lesson.date,
+            value: parsed.value,
+            kind,
+          },
+        });
+      } catch (error) {
+        console.error("[notify] не удалось поставить событие в очередь:", error);
+      }
+    }
+    // Дренаж — ПОСЛЕ ответа учителю (after): сеть не задерживает сохранение.
+    after(() => drainNotifications().catch(console.error));
+
     revalidatePath("/journal");
     revalidatePath("/student");
+    revalidatePath("/family");
 
     return actionOk(grade, `Оценка ${grade.value} сохранена`);
   } catch (error) {
@@ -248,11 +274,16 @@ export async function setGradesBulkAction(input: {
 
     // Урок и ВСЕ ученики проверяются в БД: оценку нельзя выставить ни на чужой
     // (несуществующий) id, ни пользователю с ролью учителя или администратора.
-    const [lesson, students] = await Promise.all([
+    // Существующие оценки слота 0 — чтобы не слать уведомление о неизменившемся.
+    const [lesson, students, existingGrades] = await Promise.all([
       requireWritableLesson(parsed.lessonId),
       prisma.user.findMany({
         where: { id: { in: studentIds }, role: "STUDENT" },
         select: { id: true, name: true, className: true },
+      }),
+      prisma.grade.findMany({
+        where: { lessonId: parsed.lessonId, slot: 0, studentId: { in: studentIds } },
+        select: { studentId: true, value: true },
       }),
     ]);
     if (students.length !== studentIds.length) {
@@ -326,8 +357,36 @@ export async function setGradesBulkAction(input: {
 
     await syncControlDebts(lesson.id);
 
+    // Outbox одним createMany, в своём try/catch (контракт logAudit):
+    // неизменившиеся значения отфильтрованы — семья не получает дублей.
+    try {
+      const previousByStudent = new Map(
+        existingGrades.map((grade) => [grade.studentId, grade.value]),
+      );
+      const nameByStudent = new Map(students.map((student) => [student.id, student.name]));
+      const changed = studentIds.filter(
+        (studentId) => previousByStudent.get(studentId) !== byStudent.get(studentId),
+      );
+      if (changed.length > 0) {
+        await prisma.notificationEvent.createMany({
+          data: changed.map((studentId) => ({
+            studentId,
+            studentName: nameByStudent.get(studentId) ?? "",
+            subjectName: lesson.subject.name,
+            lessonDate: lesson.date,
+            value: byStudent.get(studentId)!,
+            kind,
+          })),
+        });
+      }
+    } catch (error) {
+      console.error("[notify] не удалось поставить события в очередь:", error);
+    }
+    after(() => drainNotifications().catch(console.error));
+
     revalidatePath("/journal");
     revalidatePath("/student");
+    revalidatePath("/family");
 
     return actionOk({ count }, `Выставлено оценок: ${count}`);
   } catch (error) {

@@ -1275,6 +1275,17 @@ export async function getAttentionList(year: number): Promise<
     });
 }
 
+/**
+ * Привязка Telegram ТЕКУЩЕГО пользователя — блок в профиле родителя.
+ * userId берётся из сессии на странице, не из ввода.
+ */
+export async function getOwnTelegramLink(userId: string) {
+  return prisma.telegramLink.findUnique({
+    where: { userId },
+    select: { createdAt: true, blockedAt: true },
+  });
+}
+
 /* ── Семейный экран (родитель) ────────────────────────────────────────────── */
 
 /** Окно «что нового» для родителя, который ещё не открывал дневник: 14 дней. */

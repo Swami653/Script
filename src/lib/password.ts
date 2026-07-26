@@ -15,3 +15,19 @@ export function generateTempPassword(length = 8): string {
   }
   return password;
 }
+
+/**
+ * Алфавит кода привязки Telegram: верхний регистр без 0/O и 1/I —
+ * код диктуется по телефону и вводится с памятки без ошибок.
+ * 8 символов из 32 → 40 бит из CSPRNG.
+ */
+const LINK_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+
+/** Одноразовый код привязки Telegram. В БД попадает ТОЛЬКО его SHA-256-хеш. */
+export function generateLinkCode(length = 8): string {
+  let code = "";
+  for (let i = 0; i < length; i += 1) {
+    code += LINK_CODE_ALPHABET[randomInt(LINK_CODE_ALPHABET.length)];
+  }
+  return code;
+}

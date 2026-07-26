@@ -1,15 +1,19 @@
 import type { Metadata } from "next";
 
 import { ChangePasswordForm } from "@/app/(app)/profile/change-password-form";
+import { TelegramProfile } from "@/components/telegram-profile";
 import { RoleBadge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { requirePageUser } from "@/lib/auth-guards";
+import { getOwnTelegramLink } from "@/lib/queries";
 import { initials } from "@/lib/utils";
 
 export const metadata: Metadata = { title: "Профиль" };
 
 export default async function ProfilePage() {
   const user = await requirePageUser();
+  // Блок Telegram — только родителю; id берётся из сессии, не из ввода.
+  const telegramLink = user.role === "PARENT" ? await getOwnTelegramLink(user.id) : null;
 
   return (
     <div className="mx-auto max-w-xl space-y-5">
@@ -23,6 +27,26 @@ export default async function ProfilePage() {
           <RoleBadge role={user.role} className="mt-1.5" />
         </div>
       </header>
+
+      {user.role === "PARENT" && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Уведомления в Telegram</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <TelegramProfile
+              link={
+                telegramLink
+                  ? {
+                      createdAt: telegramLink.createdAt.toISOString(),
+                      blockedAt: telegramLink.blockedAt?.toISOString() ?? null,
+                    }
+                  : null
+              }
+            />
+          </CardContent>
+        </Card>
+      )}
 
       <Card>
         <CardHeader>

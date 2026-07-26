@@ -6,6 +6,7 @@ import { notFound } from "next/navigation";
 import { StudentReportView } from "@/components/student-report";
 import { requirePageRole } from "@/lib/auth-guards";
 import { getStudentReport } from "@/lib/queries";
+import { formatYear, getActiveYear } from "@/lib/school-year";
 import { GRADE_EDITOR_ROLES } from "@/lib/roles";
 import { initials } from "@/lib/utils";
 
@@ -19,7 +20,8 @@ export default async function StudentCardPage({
   const user = await requirePageRole(GRADE_EDITOR_ROLES);
   const { id } = await params;
 
-  const report = await getStudentReport(id, user);
+  const year = await getActiveYear();
+  const report = await getStudentReport(id, user, year);
   if (!report) notFound();
 
   return (
@@ -39,8 +41,9 @@ export default async function StudentCardPage({
         <div className="min-w-0 flex-1">
           <h1 className="text-xl font-bold tracking-tight">{report.student.name}</h1>
           <p className="text-sm text-muted-foreground">
-            {report.student.email}
-            {report.student.className ? ` · ${report.student.className}` : ""}
+            <span className="font-mono">{report.student.username}</span>
+            {report.student.className ? ` · ${report.student.className}` : ""} ·{" "}
+            {formatYear(year)}
           </p>
         </div>
         <div className="text-right">
@@ -49,7 +52,10 @@ export default async function StudentCardPage({
         </div>
       </header>
 
-      <StudentReportView report={report} />
+      <StudentReportView
+        report={report}
+        subjectHref={(subjectId) => `/student/subject/${subjectId}?student=${report.student.id}`}
+      />
     </div>
   );
 }

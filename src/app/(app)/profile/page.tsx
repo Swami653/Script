@@ -19,7 +19,7 @@ export default async function ProfilePage() {
         </span>
         <div className="min-w-0">
           <h1 className="truncate text-xl font-bold tracking-tight">{user.name}</h1>
-          <p className="truncate text-sm text-muted-foreground">{user.email}</p>
+          <p className="truncate font-mono text-sm text-muted-foreground">{user.username}</p>
           <RoleBadge role={user.role} className="mt-1.5" />
         </div>
       </header>

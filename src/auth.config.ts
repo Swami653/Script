@@ -21,6 +21,7 @@ export const authConfig = {
     jwt({ token, user, trigger, session }) {
       if (user) {
         token.role = asRole(user.role);
+        token.username = user.username ?? null;
         token.className = user.className ?? null;
       }
       if (trigger === "update" && session?.name) {
@@ -32,6 +33,7 @@ export const authConfig = {
       if (session.user) {
         session.user.id = token.sub ?? "";
         session.user.role = asRole(token.role);
+        session.user.username = token.username ?? null;
         session.user.className = token.className ?? null;
       }
       return session;

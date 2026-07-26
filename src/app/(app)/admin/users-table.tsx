@@ -1,6 +1,6 @@
 "use client";
 
-import { KeyRound, Search, Trash2 } from "lucide-react";
+import { Eye, EyeOff, KeyRound, Search, Trash2 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useMemo, useState, useTransition } from "react";
 
@@ -12,14 +12,17 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input, Select } from "@/components/ui/field";
 import { deleteUserAction, resetPasswordAction, updateUserRoleAction } from "@/lib/actions/users";
 import { ROLE_LABELS, ROLES, type Role } from "@/lib/roles";
+import { cn } from "@/lib/utils";
 
 type UserRow = {
   id: string;
   name: string;
-  email: string;
+  username: string;
   role: Role;
   className: string | null;
-  mustChangePassword: boolean;
+  /** Временный пароль виден, пока пользователь ни разу не входил. */
+  tempPassword: string | null;
+  hasLoggedIn: boolean;
   grades: number;
 };
 
@@ -35,9 +38,7 @@ export function UsersTable({
   const [pending, startTransition] = useTransition();
   const [query, setQuery] = useState("");
   const [roleFilter, setRoleFilter] = useState<string>("");
-  const [issuedPassword, setIssuedPassword] = useState<{ email: string; password: string } | null>(
-    null,
-  );
+  const [revealed, setRevealed] = useState<Record<string, boolean>>({});
 
   const filtered = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -46,11 +47,13 @@ export function UsersTable({
       if (!needle) return true;
       return (
         user.name.toLowerCase().includes(needle) ||
-        user.email.toLowerCase().includes(needle) ||
+        user.username.toLowerCase().includes(needle) ||
         (user.className ?? "").toLowerCase().includes(needle)
       );
     });
   }, [query, roleFilter, users]);
+
+  const withTempPassword = users.filter((user) => user.tempPassword).length;
 
   function handleDelete(user: UserRow) {
     const warning =
@@ -71,7 +74,11 @@ export function UsersTable({
   }
 
   function handleResetPassword(user: UserRow) {
-    if (!window.confirm(`Сбросить пароль для ${user.name}? Старый пароль перестанет работать.`))
+    if (
+      !window.confirm(
+        `Сбросить пароль для ${user.name}? Старый перестанет работать, а новый будет виден в таблице до первого входа.`,
+      )
+    )
       return;
 
     startTransition(async () => {
@@ -80,8 +87,8 @@ export function UsersTable({
         show("error", `${result.status}: ${result.error}`);
         return;
       }
-      setIssuedPassword(result.data);
-      show("success", "Пароль сброшен");
+      setRevealed((prev) => ({ ...prev, [user.id]: true }));
+      show("success", `Новый пароль для ${user.username}: ${result.data.password}`);
       router.refresh();
     });
   }
@@ -133,20 +140,12 @@ export function UsersTable({
           </div>
         </div>
 
-        {issuedPassword && (
-          <Alert tone="warning" title="Новый пароль (показывается один раз)">
-            <p className="font-mono text-sm">
-              {issuedPassword.email} — <strong>{issuedPassword.password}</strong>
-            </p>
-            <button
-              type="button"
-              className="mt-1 text-xs underline"
-              onClick={() => setIssuedPassword(null)}
-            >
-              Скрыть
-            </button>
-          </Alert>
-        )}
+        <Alert tone="info" title="Как устроен показ паролей">
+          Пароль хранится в виде необратимого bcrypt-хеша, поэтому «подсмотреть» уже
+          используемый пароль невозможно. Выданный вами временный пароль виден в столбце
+          «Пароль» до первого входа пользователя — сейчас таких записей {withTempPassword}.
+          После входа он стирается; если пароль забыт, нажмите «Сбросить пароль».
+        </Alert>
       </CardHeader>
 
       <CardContent className="p-0">
@@ -155,33 +154,69 @@ export function UsersTable({
             <thead className="bg-secondary/60 text-[11px] uppercase tracking-wide text-muted-foreground">
               <tr>
                 <th className="px-4 py-2.5 text-left font-semibold">Пользователь</th>
+                <th className="px-3 py-2.5 text-left font-semibold">Логин</th>
+                <th className="px-3 py-2.5 text-left font-semibold">Пароль</th>
                 <th className="px-3 py-2.5 text-left font-semibold">Роль</th>
                 <th className="px-3 py-2.5 text-left font-semibold">Класс</th>
                 <th className="px-3 py-2.5 text-center font-semibold">Оценок</th>
                 <th className="px-3 py-2.5 text-right font-semibold">Действия</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-border">
+            <tbody className="divide-y divide-rule">
               {filtered.map((user) => (
                 <tr key={user.id} className="group/row hover:bg-primary/[0.04]">
                   <td className="px-4 py-2">
-                    <div className="flex items-center gap-2">
-                      <div className="min-w-0">
-                        <p className="truncate font-medium">
-                          {user.name}
-                          {user.id === currentUserId && (
-                            <span className="ml-2 text-xs text-muted-foreground">(это вы)</span>
-                          )}
-                        </p>
-                        <p className="truncate text-xs text-muted-foreground">{user.email}</p>
-                      </div>
-                      {user.mustChangePassword && (
-                        <Badge tone="warning" title="Пароль выдан автоматически">
-                          временный пароль
-                        </Badge>
+                    <p className="truncate font-medium">
+                      {user.name}
+                      {user.id === currentUserId && (
+                        <span className="ml-2 text-xs text-muted-foreground">(это вы)</span>
                       )}
-                    </div>
+                    </p>
+                    {user.hasLoggedIn ? (
+                      <p className="text-xs text-muted-foreground">уже входил в систему</p>
+                    ) : (
+                      <p className="text-xs text-amber-700 dark:text-amber-300">ещё не входил</p>
+                    )}
                   </td>
+
+                  <td className="px-3 py-2 font-mono text-xs">{user.username}</td>
+
+                  <td className="px-3 py-2">
+                    {user.tempPassword ? (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setRevealed((prev) => ({ ...prev, [user.id]: !prev[user.id] }))
+                        }
+                        className={cn(
+                          "focus-ring flex items-center gap-1.5 rounded px-1.5 py-0.5 font-mono text-xs",
+                          revealed[user.id]
+                            ? "bg-amber-100 font-semibold text-amber-900 dark:bg-amber-500/15 dark:text-amber-100"
+                            : "text-muted-foreground hover:bg-accent",
+                        )}
+                        title={
+                          revealed[user.id] ? "Скрыть пароль" : "Показать временный пароль"
+                        }
+                      >
+                        {revealed[user.id] ? (
+                          <>
+                            <EyeOff className="h-3.5 w-3.5" aria-hidden />
+                            {user.tempPassword}
+                          </>
+                        ) : (
+                          <>
+                            <Eye className="h-3.5 w-3.5" aria-hidden />
+                            показать
+                          </>
+                        )}
+                      </button>
+                    ) : (
+                      <span className="text-xs text-muted-foreground" title="Пароль известен только владельцу">
+                        —
+                      </span>
+                    )}
+                  </td>
+
                   <td className="px-3 py-2">
                     {user.id === currentUserId ? (
                       <RoleBadge role={user.role} />
@@ -189,7 +224,7 @@ export function UsersTable({
                       <Select
                         value={user.role}
                         onChange={(event) => handleRoleChange(user, event.target.value)}
-                        className="h-8 w-40 text-xs"
+                        className="h-8 w-36 text-xs"
                         aria-label={`Роль пользователя ${user.name}`}
                         disabled={pending}
                       >
@@ -201,8 +236,10 @@ export function UsersTable({
                       </Select>
                     )}
                   </td>
+
                   <td className="px-3 py-2 text-muted-foreground">{user.className ?? "—"}</td>
                   <td className="px-3 py-2 text-center tabular-nums">{user.grades}</td>
+
                   <td className="px-3 py-2">
                     <div className="flex justify-end gap-1">
                       <Button
@@ -231,7 +268,7 @@ export function UsersTable({
 
               {filtered.length === 0 && (
                 <tr>
-                  <td colSpan={5} className="px-4 py-8 text-center text-muted-foreground">
+                  <td colSpan={7} className="px-4 py-8 text-center text-muted-foreground">
                     Никого не найдено.
                   </td>
                 </tr>

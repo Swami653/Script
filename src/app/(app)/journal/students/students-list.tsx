@@ -7,7 +7,7 @@ import { useMemo, useState } from "react";
 import { Input } from "@/components/ui/field";
 import { initials } from "@/lib/utils";
 
-type Student = { id: string; name: string; email: string; className: string | null };
+type Student = { id: string; name: string; username: string; className: string | null };
 
 export function StudentsList({ students }: { students: Student[] }) {
   const [query, setQuery] = useState("");
@@ -18,7 +18,7 @@ export function StudentsList({ students }: { students: Student[] }) {
     return students.filter(
       (student) =>
         student.name.toLowerCase().includes(needle) ||
-        student.email.toLowerCase().includes(needle) ||
+        student.username.toLowerCase().includes(needle) ||
         (student.className ?? "").toLowerCase().includes(needle),
     );
   }, [query, students]);
@@ -33,7 +33,7 @@ export function StudentsList({ students }: { students: Student[] }) {
         <Input
           value={query}
           onChange={(event) => setQuery(event.target.value)}
-          placeholder="Поиск по фамилии, классу или e-mail…"
+          placeholder="Поиск по фамилии, классу или логину…"
           className="pl-9"
           aria-label="Поиск ученика"
         />
@@ -58,8 +58,8 @@ export function StudentsList({ students }: { students: Student[] }) {
                 </span>
                 <span className="min-w-0 flex-1">
                   <span className="block truncate font-medium">{student.name}</span>
-                  <span className="block truncate text-xs text-muted-foreground">
-                    {student.email}
+                  <span className="block truncate font-mono text-xs text-muted-foreground">
+                    {student.username}
                   </span>
                 </span>
                 {student.className && (

@@ -6,31 +6,31 @@ import { signIn, signOut } from "@/auth";
 
 export type LoginState = {
   error?: string;
-  email?: string;
+  username?: string;
 };
 
 /**
- * Вход по e-mail и паролю.
+ * Вход по логину и паролю.
  * Пароль проверяется bcrypt-сравнением в src/auth.ts, сессия — JWT.
  */
 export async function loginAction(
   _prevState: LoginState,
   formData: FormData,
 ): Promise<LoginState> {
-  const email = String(formData.get("email") ?? "").trim();
+  const username = String(formData.get("username") ?? "").trim();
   const password = String(formData.get("password") ?? "");
 
-  if (!email || !password) {
-    return { error: "Введите e-mail и пароль", email };
+  if (!username || !password) {
+    return { error: "Введите логин и пароль", username };
   }
 
   try {
     // Успешный вход бросает NEXT_REDIRECT — его перехватывать нельзя.
-    await signIn("credentials", { email, password, redirectTo: "/" });
+    await signIn("credentials", { username, password, redirectTo: "/" });
     return {};
   } catch (error) {
     if (error instanceof AuthError) {
-      return { error: "Неверный e-mail или пароль", email };
+      return { error: "Неверный логин или пароль", username };
     }
     throw error;
   }

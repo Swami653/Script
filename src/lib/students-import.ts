@@ -56,15 +56,11 @@ export function parseStudentNames(raw: string): string[] {
 }
 
 /**
- * Логин из ФИО: «Иванов Иван Иванович» -> «ivanov.i.i@school.com».
- * `taken` — множество уже занятых e-mail (в нижнем регистре); при конфликте
- * добавляется числовой суффикс.
+ * Логин из ФИО: «Иванов Иван Иванович» -> «ivanov.i.i».
+ * Почта не нужна — школе достаточно логина. `taken` — множество уже занятых
+ * логинов (в нижнем регистре); при конфликте добавляется числовой суффикс.
  */
-export function buildStudentEmail(
-  fullName: string,
-  taken: Set<string>,
-  domain = "school.com",
-): string {
+export function buildStudentLogin(fullName: string, taken: Set<string>): string {
   const parts = fullName.split(/\s+/).filter(Boolean);
   const surname = transliterate(parts[0] ?? "") || "student";
   const initials = parts
@@ -73,11 +69,11 @@ export function buildStudentEmail(
     .filter(Boolean);
 
   const base = [surname, ...initials].filter(Boolean).join(".");
-  let candidate = `${base}@${domain}`;
+  let candidate = base;
   let counter = 2;
 
   while (taken.has(candidate.toLowerCase())) {
-    candidate = `${base}${counter}@${domain}`;
+    candidate = `${base}${counter}`;
     counter += 1;
   }
 

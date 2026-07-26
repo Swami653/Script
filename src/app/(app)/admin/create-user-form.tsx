@@ -1,6 +1,6 @@
 "use client";
 
-import { UserPlus } from "lucide-react";
+import { Dices, UserPlus } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
 
@@ -10,12 +10,21 @@ import { FieldHint, Input, Label, Select } from "@/components/ui/field";
 import { createUserAction } from "@/lib/actions/users";
 import { ROLE_LABELS, ROLES } from "@/lib/roles";
 
+/** Пароль без похожих символов — его придётся диктовать вслух. */
+function randomPassword(length = 8): string {
+  const alphabet = "abcdefghijkmnpqrstuvwxyzACDEFGHJKLMNPQRSTUVWXYZ23456789";
+  const bytes = new Uint32Array(length);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (byte) => alphabet[byte % alphabet.length]).join("");
+}
+
 export function CreateUserForm() {
   const router = useRouter();
   const { flash, show, clear } = useFlash();
   const [pending, startTransition] = useTransition();
   const [form, setForm] = useState({
     name: "",
+    username: "",
     email: "",
     password: "",
     role: "STUDENT" as string,
@@ -34,7 +43,7 @@ export function CreateUserForm() {
         show("error", `${result.status}: ${result.error}`);
         return;
       }
-      setForm({ name: "", email: "", password: "", role: form.role, className: "" });
+      setForm({ name: "", username: "", email: "", password: "", role: form.role, className: "" });
       show("success", result.message ?? "Пользователь создан");
       router.refresh();
     });
@@ -54,28 +63,43 @@ export function CreateUserForm() {
       </div>
 
       <div className="space-y-1.5">
-        <Label htmlFor="user-email">E-mail (логин)</Label>
+        <Label htmlFor="user-username">Логин</Label>
         <Input
-          id="user-email"
-          type="email"
-          value={form.email}
-          onChange={(event) => update({ email: event.target.value })}
-          placeholder="smirnova@school.com"
+          id="user-username"
+          value={form.username}
+          onChange={(event) => update({ username: event.target.value })}
+          placeholder="smirnova.o.p"
+          autoCapitalize="none"
+          spellCheck={false}
           required
         />
+        <FieldHint>Латиница, цифры, точка, дефис. Почта не нужна.</FieldHint>
       </div>
 
       <div className="space-y-1.5">
         <Label htmlFor="user-password">Пароль</Label>
-        <Input
-          id="user-password"
-          type="text"
-          value={form.password}
-          onChange={(event) => update({ password: event.target.value })}
-          minLength={6}
-          required
-        />
-        <FieldHint>Минимум 6 символов. Хранится только bcrypt-хеш.</FieldHint>
+        <div className="flex gap-2">
+          <Input
+            id="user-password"
+            type="text"
+            value={form.password}
+            onChange={(event) => update({ password: event.target.value })}
+            minLength={6}
+            required
+          />
+          <Button
+            type="button"
+            variant="outline"
+            title="Придумать пароль"
+            onClick={() => update({ password: randomPassword() })}
+          >
+            <Dices className="h-4 w-4" aria-hidden />
+          </Button>
+        </div>
+        <FieldHint>
+          Минимум 6 символов. В базе — только bcrypt-хеш; этот пароль будет виден
+          в таблице до первого входа пользователя.
+        </FieldHint>
       </div>
 
       <div className="grid gap-3 sm:grid-cols-2">

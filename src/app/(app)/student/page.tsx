@@ -1,15 +1,11 @@
 import type { Metadata } from "next";
+import Link from "next/link";
 
 import { StudentReportView } from "@/components/student-report";
 import { requirePageRole } from "@/lib/auth-guards";
-import {
-  academicYearLabel,
-  averageColorClasses,
-  displayQuarter,
-  formatAverage,
-  gradeColorClasses,
-} from "@/lib/grades";
+import { averageColorClasses, displayQuarter, formatAverage, gradeColorClasses } from "@/lib/grades";
 import { getRecentGrades, getStudentReport } from "@/lib/queries";
+import { formatYear, getActiveYear } from "@/lib/school-year";
 import { cn, formatDateShort } from "@/lib/utils";
 
 export const metadata: Metadata = { title: "Мой дневник" };
@@ -17,10 +13,11 @@ export const metadata: Metadata = { title: "Мой дневник" };
 export default async function StudentPage() {
   // Только ученик: учитель и администратор будут перенаправлены в свои разделы.
   const user = await requirePageRole(["STUDENT"]);
+  const year = await getActiveYear();
 
   const [report, recent] = await Promise.all([
-    getStudentReport(user.id, user),
-    getRecentGrades(user.id),
+    getStudentReport(user.id, user, year),
+    getRecentGrades(user.id, year),
   ]);
 
   if (!report) {
@@ -40,7 +37,7 @@ export default async function StudentPage() {
       <header className="flex flex-wrap items-end justify-between gap-x-8 gap-y-4">
         <div>
           <p className="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">
-            {academicYearLabel()} учебный год
+            {formatYear(year)} учебный год
           </p>
           <h1 className="mt-1 text-[1.75rem] font-extrabold leading-tight tracking-tight">
             Мой дневник
@@ -54,9 +51,7 @@ export default async function StudentPage() {
         {/* Две главные цифры — крупно и без карточек */}
         <dl className="flex items-end gap-8">
           <div>
-            <dt className="text-xs text-muted-foreground">
-              Средний за {shownQuarter} четверть
-            </dt>
+            <dt className="text-xs text-muted-foreground">Средний за {shownQuarter} четверть</dt>
             <dd
               className={cn(
                 "text-3xl font-extrabold tabular-nums",
@@ -80,7 +75,7 @@ export default async function StudentPage() {
         </dl>
       </header>
 
-      <StudentReportView report={report} />
+      <StudentReportView report={report} subjectHref={(id) => `/student/subject/${id}`} />
 
       <section>
         <h2 className="mb-2 px-1 text-sm font-semibold uppercase tracking-wide text-muted-foreground">
@@ -93,27 +88,34 @@ export default async function StudentPage() {
         ) : (
           <ul className="divide-y divide-rule overflow-hidden rounded-lg border border-rule-strong bg-card">
             {recent.map((grade) => (
-              <li key={grade.id} className="flex items-center gap-3 px-3 py-2">
-                <span
-                  className={cn(
-                    "flex h-8 w-9 shrink-0 items-center justify-center rounded text-[15px] font-bold tabular-nums",
-                    gradeColorClasses(grade.value),
-                  )}
+              <li key={grade.id}>
+                <Link
+                  href={`/student/subject/${grade.subject.id}`}
+                  className="focus-ring flex items-center gap-3 px-3 py-2 hover:bg-primary/[0.05]"
                 >
-                  {grade.value}
-                </span>
-                <span className="min-w-0 flex-1">
-                  <span className="block truncate text-sm font-medium">{grade.subject.name}</span>
-                  <span className="block truncate text-xs text-muted-foreground">
-                    {formatDateShort(grade.lesson.date)} · {grade.quarter} четверть
-                    {grade.lesson.topic ? ` · ${grade.lesson.topic}` : ""}
+                  <span
+                    className={cn(
+                      "flex h-8 w-9 shrink-0 items-center justify-center rounded text-[15px] font-bold tabular-nums",
+                      gradeColorClasses(grade.value),
+                    )}
+                  >
+                    {grade.value}
                   </span>
-                </span>
-                {grade.teacher && (
-                  <span className="hidden shrink-0 text-xs text-muted-foreground sm:block">
-                    {grade.teacher.name}
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-sm font-medium">
+                      {grade.subject.name}
+                    </span>
+                    <span className="block truncate text-xs text-muted-foreground">
+                      {formatDateShort(grade.lesson.date)} · {grade.quarter} четверть
+                      {grade.lesson.topic ? ` · ${grade.lesson.topic}` : ""}
+                    </span>
                   </span>
-                )}
+                  {grade.teacher && (
+                    <span className="hidden shrink-0 text-xs text-muted-foreground sm:block">
+                      {grade.teacher.name}
+                    </span>
+                  )}
+                </Link>
               </li>
             ))}
           </ul>

@@ -5,6 +5,7 @@ import { toCsv, withBom } from "@/lib/csv";
 import { formatAverage, isValidQuarter, type Quarter } from "@/lib/grades";
 import { prisma } from "@/lib/prisma";
 import { getJournalData } from "@/lib/queries";
+import { getActiveYear } from "@/lib/school-year";
 import { GRADE_EDITOR_ROLES } from "@/lib/roles";
 import { formatDateShort } from "@/lib/utils";
 
@@ -21,6 +22,7 @@ export async function GET(request: NextRequest) {
     const { searchParams } = request.nextUrl;
     const subjectId = searchParams.get("subject");
     const quarterParam = Number(searchParams.get("quarter"));
+    const yearParam = Number(searchParams.get("year"));
     const className = searchParams.get("class");
 
     if (!subjectId) {
@@ -39,7 +41,8 @@ export async function GET(request: NextRequest) {
     }
 
     const quarter = quarterParam as Quarter;
-    const data = await getJournalData(subjectId, quarter, className);
+    const year = Number.isInteger(yearParam) ? yearParam : await getActiveYear();
+    const data = await getJournalData(subjectId, quarter, year, className);
 
     const headers = [
       "Ученик",
@@ -52,13 +55,19 @@ export async function GET(request: NextRequest) {
     const rows = data.rows.map((row) => [
       row.student.name,
       row.student.className ?? "",
-      ...data.lessons.map((lesson) => row.cells[lesson.id]?.value ?? ""),
+      // Две оценки за урок выгружаются как «10/9» — так же, как в журнале.
+      ...data.lessons.map((lesson) =>
+        (row.cells[lesson.id] ?? [])
+          .sort((a, b) => a.slot - b.slot)
+          .map((grade) => grade.value)
+          .join("/"),
+      ),
       formatAverage(row.average),
       row.year ?? "",
     ]);
 
     const csv = withBom(toCsv(headers, rows));
-    const filename = `journal-${subject.name}-q${quarter}.csv`.replace(/\s+/g, "-");
+    const filename = `journal-${subject.name}-${year}-q${quarter}.csv`.replace(/\s+/g, "-");
 
     return new NextResponse(csv, {
       status: 200,

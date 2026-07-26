@@ -3,7 +3,7 @@ import Link from "next/link";
 import { LogoutButton, NavLinks, ThemeToggle } from "@/components/app-nav";
 import { RoleBadge } from "@/components/ui/badge";
 import { requirePageUser } from "@/lib/auth-guards";
-import { academicYearLabel } from "@/lib/grades";
+import { formatYear, getActiveYear } from "@/lib/school-year";
 import { ROLE_HOME, type Role } from "@/lib/roles";
 import { initials } from "@/lib/utils";
 
@@ -13,11 +13,13 @@ const NAV_BY_ROLE: Record<Role, { href: string; label: string; exact?: boolean }
     { href: "/journal", label: "Журнал", exact: true },
     { href: "/journal/subjects", label: "Предметы" },
     { href: "/journal/students", label: "Ученики" },
+    { href: "/journal/year", label: "Учебный год" },
   ],
   TEACHER: [
     { href: "/journal", label: "Журнал", exact: true },
     { href: "/journal/subjects", label: "Предметы" },
     { href: "/journal/students", label: "Ученики" },
+    { href: "/journal/year", label: "Учебный год" },
   ],
   STUDENT: [{ href: "/student", label: "Мой дневник", exact: true }],
 };
@@ -26,6 +28,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
   // Первый серверный рубеж: без сессии дальше не пускаем.
   const user = await requirePageUser();
   const navItems = NAV_BY_ROLE[user.role];
+  const year = await getActiveYear();
 
   return (
     <div className="flex min-h-screen flex-col">
@@ -81,7 +84,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
       <main className="mx-auto w-full max-w-[1600px] flex-1 px-4 py-6 sm:px-6">{children}</main>
 
       <footer className="border-t border-rule py-4 text-center text-xs text-muted-foreground">
-        {academicYearLabel()} учебный год
+        {formatYear(year)} учебный год
       </footer>
     </div>
   );

@@ -10,15 +10,15 @@
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
     "db:push": "prisma db push",
-    "db:seed": "prisma db seed",
+    "db:seed": "tsx prisma/bootstrap.ts",
     "db:reset": "prisma migrate reset --force --skip-generate",
     "db:studio": "prisma studio",
-    "setup": "prisma generate && prisma migrate deploy && prisma db seed",
-    "vercel-build": "prisma generate && prisma migrate deploy && tsx prisma/seed-if-empty.ts && next build",
+    "setup": "prisma generate && prisma migrate deploy && tsx prisma/bootstrap.ts",
+    "vercel-build": "prisma generate && prisma migrate deploy && tsx prisma/bootstrap.ts && next build",
     "db:deploy": "prisma migrate deploy"
   },
   "prisma": {
-    "seed": "tsx prisma/seed.ts"
+    "seed": "tsx prisma/bootstrap.ts"
   },
   "dependencies": {
     "@prisma/client": "6.19.3",

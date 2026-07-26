@@ -5,7 +5,7 @@ import { CreateUserForm } from "@/app/(app)/admin/create-user-form";
 import { UsersTable } from "@/app/(app)/admin/users-table";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { requirePageRole } from "@/lib/auth-guards";
-import { academicYearLabel } from "@/lib/grades";
+import { formatYear, getActiveYear } from "@/lib/school-year";
 import { getAdminStats, getAllUsers } from "@/lib/queries";
 import { asRole } from "@/lib/roles";
 import { pluralize } from "@/lib/utils";
@@ -14,7 +14,7 @@ export const metadata: Metadata = { title: "Панель администрат�
 
 export default async function AdminPage() {
   const admin = await requirePageRole(["ADMIN"]);
-  const [stats, users] = await Promise.all([getAdminStats(), getAllUsers()]);
+  const [stats, users, year] = await Promise.all([getAdminStats(), getAllUsers(), getActiveYear()]);
 
   const figures = [
     { value: stats.students, forms: ["ученик", "ученика", "учеников"] as const },
@@ -32,7 +32,7 @@ export default async function AdminPage() {
     <div className="space-y-6">
       <header>
         <p className="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">
-          {academicYearLabel()} учебный год
+          {formatYear(year)} учебный год
         </p>
         <h1 className="mt-1 text-[1.75rem] font-extrabold leading-tight tracking-tight">
           Панель администратора
@@ -82,10 +82,11 @@ export default async function AdminPage() {
           users={users.map((user) => ({
             id: user.id,
             name: user.name,
-            email: user.email,
+            username: user.username,
             role: asRole(user.role),
             className: user.className,
-            mustChangePassword: user.mustChangePassword,
+            tempPassword: user.tempPassword,
+            hasLoggedIn: user.lastLoginAt !== null,
             grades: user._count.grades,
           }))}
         />

@@ -7,6 +7,7 @@ import { actionError, actionFail, actionOk, type ActionResult } from "@/lib/acti
 import { requireRole } from "@/lib/auth-guards";
 import { quarterSchema } from "@/lib/grades";
 import { prisma } from "@/lib/prisma";
+import { academicYearOf, quarterForDate } from "@/lib/quarters";
 import { GRADE_EDITOR_ROLES } from "@/lib/roles";
 import { parseDateInputValue } from "@/lib/utils";
 
@@ -15,16 +16,17 @@ import { parseDateInputValue } from "@/lib/utils";
 const createLessonSchema = z.object({
   subjectId: z.string().min(1, "Не выбран предмет"),
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Дата должна быть в формате ГГГГ-ММ-ДД"),
-  quarter: quarterSchema,
+  /** Используется, только если дата не попадает ни в одну заданную четверть. */
+  quarter: quarterSchema.optional(),
   topic: z.string().trim().max(120, "Тема урока — не длиннее 120 символов").optional(),
 });
 
 export async function createLessonAction(input: {
   subjectId: string;
   date: string;
-  quarter: number;
+  quarter?: number;
   topic?: string;
-}): Promise<ActionResult<{ id: string }>> {
+}): Promise<ActionResult<{ id: string; quarter: number; year: number }>> {
   try {
     const teacher = await requireRole(GRADE_EDITOR_ROLES);
     const parsed = createLessonSchema.parse(input);
@@ -37,30 +39,51 @@ export async function createLessonAction(input: {
 
     const date = parseDateInputValue(parsed.date);
 
+    /**
+     * Четверть и учебный год определяет расписание, заданное учителем,
+     * а не то, что прислал клиент: так урок не может «уехать» в чужой период.
+     * Если границы ещё не заданы, берём четверть из формы, год — по дате.
+     */
+    const periods = await prisma.quarterPeriod.findMany({
+      select: { quarter: true, startDate: true, endDate: true, year: true },
+    });
+
+    const matched = periods.find(
+      (period) => date >= period.startDate && date <= period.endDate,
+    );
+
+    const quarter = matched?.quarter ?? quarterForDate(periods, date) ?? parsed.quarter;
+    if (!quarter) {
+      return actionFail(
+        "Дата не попадает ни в одну заданную четверть. Укажите четверть вручную " +
+          "или задайте её границы в разделе «Учебный год».",
+        400,
+      );
+    }
+    const year = matched?.year ?? academicYearOf(date);
+
     const duplicate = await prisma.lesson.findUnique({
       where: { subjectId_date: { subjectId: parsed.subjectId, date } },
       select: { id: true, quarter: true },
     });
     if (duplicate) {
-      return actionFail(
-        `Урок на эту дату уже существует (${duplicate.quarter} четверть)`,
-        409,
-      );
+      return actionFail(`Урок на эту дату уже существует (${duplicate.quarter} четверть)`, 409);
     }
 
     const lesson = await prisma.lesson.create({
       data: {
         subjectId: parsed.subjectId,
-        quarter: parsed.quarter,
+        quarter,
+        year,
         date,
         topic: parsed.topic?.trim() || null,
         teacherId: teacher.id,
       },
-      select: { id: true },
+      select: { id: true, quarter: true, year: true },
     });
 
     revalidatePath("/journal");
-    return actionOk(lesson, "Урок добавлен");
+    return actionOk(lesson, `Урок добавлен в ${lesson.quarter} четверть`);
   } catch (error) {
     return actionError(error);
   }

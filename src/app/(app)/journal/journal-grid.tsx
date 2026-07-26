@@ -8,7 +8,7 @@ import { createPortal } from "react-dom";
 
 import { Flash, useFlash } from "@/components/flash";
 import { Button } from "@/components/ui/button";
-import { deleteGradeAction, setGradeAction } from "@/lib/actions/grades";
+import { clearCellAction, deleteGradeAction, setGradeAction } from "@/lib/actions/grades";
 import { deleteLessonAction } from "@/lib/actions/lessons";
 import {
   averageColorClasses,
@@ -16,6 +16,7 @@ import {
   formatAverage,
   gradeColorClasses,
   MAX_GRADE,
+  MAX_GRADES_PER_LESSON,
   MIN_GRADE,
   yearGrade,
   type Quarter,
@@ -28,11 +29,15 @@ export type GridLesson = {
   topic: string | null;
 };
 
+/**
+ * Клетка журнала — массив оценок за один урок: [] пусто, [8] одна,
+ * [10, 9] две («10/9» за контрольную).
+ */
 export type GridRow = {
   studentId: string;
   name: string;
   className: string | null;
-  cells: Record<string, { id: string; value: number }>;
+  cells: Record<string, number[]>;
   quarterAverages: (number | null)[];
 };
 
@@ -55,16 +60,17 @@ function shortName(name: string): string {
 
 /**
  * Журнал класса. Разворот ведомости: строки — ученики, столбцы — уроки,
- * справа за двойной линейкой — итоги (средний за четверть и годовая).
+ * справа за чертой — итоги (средний за четверть и годовая).
+ *
+ * За один урок можно поставить до двух оценок — «10/9» за контрольную.
+ * Это две отдельные целые оценки, каждая идёт в средний балл сама по себе.
  *
  * Клавиатура:
- *   ← → ↑ ↓  — перемещение по ячейкам
- *   1…9      — выставить оценку, 0 — выставить 10 (наберите «10» — тоже работает)
- *   Enter    — открыть выбор оценки мышью
- *   Delete / Backspace — удалить оценку
- *
- * Оценка применяется оптимистично; при отказе сервера (например, 403 для
- * ученика) значение откатывается и показывается уведомление.
+ *   ← → ↑ ↓        — перемещение по клеткам
+ *   1…9, 0 = 10    — первая оценка
+ *   Shift + цифра  — вторая оценка в той же клетке
+ *   Enter          — открыть выбор мышью
+ *   Delete         — убрать последнюю оценку клетки (Shift+Delete — очистить клетку)
  */
 export function JournalGrid({
   lessons,
@@ -81,12 +87,13 @@ export function JournalGrid({
   const { flash, show, clear } = useFlash();
   const [, startTransition] = useTransition();
 
-  const [overrides, setOverrides] = useState<Record<string, number | null>>({});
+  /** Оптимистичные значения клеток поверх серверных данных. */
+  const [overrides, setOverrides] = useState<Record<string, number[]>>({});
   const [selected, setSelected] = useState<{ row: number; col: number } | null>(null);
   const [picker, setPicker] = useState<{ row: number; col: number; x: number; y: number } | null>(
     null,
   );
-  /** Ячейки, куда оценка «легла» только что — для короткой анимации. */
+  /** Клетки, куда оценка «легла» только что — для короткой анимации. */
   const [settled, setSettled] = useState<Record<string, number>>({});
   const pendingOne = useRef<ReturnType<typeof setTimeout> | null>(null);
   const gridRef = useRef<HTMLDivElement>(null);
@@ -98,14 +105,14 @@ export function JournalGrid({
 
   useEffect(() => () => void (pendingOne.current && clearTimeout(pendingOne.current)), []);
 
-  const valueAt = useCallback(
-    (rowIndex: number, colIndex: number): number | null => {
+  const valuesAt = useCallback(
+    (rowIndex: number, colIndex: number): number[] => {
       const row = rows[rowIndex];
       const lesson = lessons[colIndex];
-      if (!row || !lesson) return null;
+      if (!row || !lesson) return [];
       const key = cellKey(row.studentId, lesson.id);
-      if (key in overrides) return overrides[key] ?? null;
-      return row.cells[lesson.id]?.value ?? null;
+      if (key in overrides) return overrides[key] ?? [];
+      return row.cells[lesson.id] ?? [];
     },
     [lessons, overrides, rows],
   );
@@ -115,8 +122,7 @@ export function JournalGrid({
       rows.map((row, rowIndex) => {
         const values: number[] = [];
         for (let colIndex = 0; colIndex < lessons.length; colIndex += 1) {
-          const value = valueAt(rowIndex, colIndex);
-          if (value !== null) values.push(value);
+          values.push(...valuesAt(rowIndex, colIndex));
         }
         const average = averageGrade(values);
         const quarterAverages = row.quarterAverages.map((item, index) =>
@@ -124,7 +130,7 @@ export function JournalGrid({
         );
         return { average, year: yearGrade(quarterAverages) };
       }),
-    [lessons.length, quarter, rows, valueAt],
+    [lessons.length, quarter, rows, valuesAt],
   );
 
   const classAverage = useMemo(
@@ -138,26 +144,33 @@ export function JournalGrid({
       ?.focus();
   }, []);
 
-  const markSettled = useCallback((key: string) => {
-    setSettled((prev) => ({ ...prev, [key]: (prev[key] ?? 0) + 1 }));
-  }, []);
-
+  /** Записать оценку в позицию slot. Значения клетки обновляются оптимистично. */
   const commitGrade = useCallback(
-    (rowIndex: number, colIndex: number, value: number) => {
+    (rowIndex: number, colIndex: number, value: number, slot: number) => {
       const row = rows[rowIndex];
       const lesson = lessons[colIndex];
       if (!row || !lesson) return;
+      if (slot >= MAX_GRADES_PER_LESSON) return;
 
       const key = cellKey(row.studentId, lesson.id);
-      const previous = row.cells[lesson.id]?.value ?? null;
-      setOverrides((prev) => ({ ...prev, [key]: value }));
-      markSettled(key);
+      const previous = valuesAt(rowIndex, colIndex);
+      if (slot > previous.length) {
+        show("error", "Сначала поставьте первую оценку за этот урок");
+        return;
+      }
+
+      const next = [...previous];
+      next[slot] = value;
+
+      setOverrides((prev) => ({ ...prev, [key]: next }));
+      setSettled((prev) => ({ ...prev, [key]: (prev[key] ?? 0) + 1 }));
 
       startTransition(async () => {
         const result = await setGradeAction({
           studentId: row.studentId,
           lessonId: lesson.id,
           value,
+          slot,
         });
 
         if (!result.ok) {
@@ -168,26 +181,55 @@ export function JournalGrid({
         router.refresh();
       });
     },
-    [lessons, markSettled, router, rows, show],
+    [lessons, router, rows, show, valuesAt],
   );
 
+  /** Убрать одну оценку из клетки; оставшаяся сдвигается на её место. */
   const removeGrade = useCallback(
+    (rowIndex: number, colIndex: number, slot: number) => {
+      const row = rows[rowIndex];
+      const lesson = lessons[colIndex];
+      if (!row || !lesson) return;
+
+      const key = cellKey(row.studentId, lesson.id);
+      const previous = valuesAt(rowIndex, colIndex);
+      if (previous.length === 0 || slot >= previous.length) return;
+
+      const next = previous.filter((_, index) => index !== slot);
+      setOverrides((prev) => ({ ...prev, [key]: next }));
+
+      startTransition(async () => {
+        const result = await deleteGradeAction({
+          studentId: row.studentId,
+          lessonId: lesson.id,
+          slot,
+        });
+        if (!result.ok) {
+          setOverrides((prev) => ({ ...prev, [key]: previous }));
+          show("error", `${result.status}: ${result.error}`);
+          return;
+        }
+        router.refresh();
+      });
+    },
+    [lessons, router, rows, show, valuesAt],
+  );
+
+  /** Очистить клетку целиком (обе половинки «10/9»). */
+  const clearCell = useCallback(
     (rowIndex: number, colIndex: number) => {
       const row = rows[rowIndex];
       const lesson = lessons[colIndex];
       if (!row || !lesson) return;
 
       const key = cellKey(row.studentId, lesson.id);
-      const previous = row.cells[lesson.id]?.value ?? null;
-      if (previous === null && !(key in overrides)) return;
+      const previous = valuesAt(rowIndex, colIndex);
+      if (previous.length === 0) return;
 
-      setOverrides((prev) => ({ ...prev, [key]: null }));
+      setOverrides((prev) => ({ ...prev, [key]: [] }));
 
       startTransition(async () => {
-        const result = await deleteGradeAction({
-          studentId: row.studentId,
-          lessonId: lesson.id,
-        });
+        const result = await clearCellAction({ studentId: row.studentId, lessonId: lesson.id });
         if (!result.ok) {
           setOverrides((prev) => ({ ...prev, [key]: previous }));
           show("error", `${result.status}: ${result.error}`);
@@ -196,7 +238,7 @@ export function JournalGrid({
         router.refresh();
       });
     },
-    [lessons, overrides, router, rows, show],
+    [lessons, router, rows, show, valuesAt],
   );
 
   /** Как в ведомости: выставил — курсор ушёл к следующему ученику. */
@@ -212,7 +254,7 @@ export function JournalGrid({
   );
 
   function handleKeyDown(event: React.KeyboardEvent<HTMLButtonElement>, row: number, col: number) {
-    const { key } = event;
+    const { key, shiftKey } = event;
 
     const move = (nextRow: number, nextCol: number) => {
       event.preventDefault();
@@ -239,19 +281,26 @@ export function JournalGrid({
 
     if (key === "Delete" || key === "Backspace") {
       event.preventDefault();
-      removeGrade(row, col);
+      const values = valuesAt(row, col);
+      if (values.length === 0) return;
+      // Shift — очистить клетку целиком, иначе убрать последнюю оценку.
+      if (shiftKey) clearCell(row, col);
+      else removeGrade(row, col, values.length - 1);
       return;
     }
 
+    // Shift + цифра ставит вторую оценку в ту же клетку.
+    const slot = shiftKey ? 1 : 0;
+
     // «0» = 10; «1» ждёт возможного «0», чтобы набор «10» работал естественно.
-    if (key === "0") {
+    if (key === "0" || (shiftKey && key === ")")) {
       event.preventDefault();
       if (pendingOne.current) {
         clearTimeout(pendingOne.current);
         pendingOne.current = null;
       }
-      commitGrade(row, col, 10);
-      advanceDown(row, col);
+      commitGrade(row, col, 10, slot);
+      if (slot === 0) advanceDown(row, col);
       return;
     }
 
@@ -260,21 +309,24 @@ export function JournalGrid({
       const value = Number(key);
 
       if (value === 1) {
+        const previous = valuesAt(row, col);
+        const optimistic = [...previous];
+        optimistic[slot] = 1;
         setOverrides((prev) => ({
           ...prev,
-          [cellKey(rows[row]!.studentId, lessons[col]!.id)]: 1,
+          [cellKey(rows[row]!.studentId, lessons[col]!.id)]: optimistic,
         }));
         if (pendingOne.current) clearTimeout(pendingOne.current);
         pendingOne.current = setTimeout(() => {
           pendingOne.current = null;
-          commitGrade(row, col, 1);
-          advanceDown(row, col);
+          commitGrade(row, col, 1, slot);
+          if (slot === 0) advanceDown(row, col);
         }, 450);
         return;
       }
 
-      commitGrade(row, col, value);
-      advanceDown(row, col);
+      commitGrade(row, col, value, slot);
+      if (slot === 0) advanceDown(row, col);
     }
   }
 
@@ -327,7 +379,7 @@ export function JournalGrid({
                   key={lesson.id}
                   scope="col"
                   className={cn(
-                    "group w-[3.25rem] border-b-2 border-rule-strong px-0 py-1.5 align-bottom font-medium",
+                    "group w-[4.25rem] border-b-2 border-rule-strong px-0 py-1.5 align-bottom font-medium",
                     // Смена месяца — единственная вертикальная линия внутри сетки:
                     // она несёт смысл, а не украшает.
                     index > 0 &&
@@ -337,8 +389,6 @@ export function JournalGrid({
                   )}
                   title={`${formatDateLong(lesson.date)}${lesson.topic ? ` — ${lesson.topic}` : ""}`}
                 >
-                  {/* Только дата: обрезанная до «Сочине…» тема ничего не сообщает.
-                      Полная тема — в подсказке и в мобильном выборе урока. */}
                   <div className="flex flex-col items-center gap-0.5">
                     <span className="text-[13px] tabular-nums">{formatDateShort(lesson.date)}</span>
                     {canEdit && <DeleteLessonButton lessonId={lesson.id} onError={show} />}
@@ -348,8 +398,6 @@ export function JournalGrid({
               {/* Незаполненная часть разворота: забирает лишнюю ширину,
                   чтобы столбцы уроков стояли плотно, а не расползались */}
               <th scope="col" aria-hidden className="w-auto border-b-2 border-rule-strong" />
-
-              {/* Двойная линейка отделяет итоги — как в бумажной ведомости */}
               <th
                 scope="col"
                 className="w-24 border-b-2 border-l border-rule-strong bg-secondary/40 px-3 py-2 text-center align-bottom text-xs font-semibold uppercase tracking-wide text-muted-foreground"
@@ -388,7 +436,7 @@ export function JournalGrid({
                 </th>
 
                 {lessons.map((lesson, colIndex) => {
-                  const value = valueAt(rowIndex, colIndex);
+                  const values = valuesAt(rowIndex, colIndex);
                   const isSelected = selected?.row === rowIndex && selected?.col === colIndex;
                   const key = cellKey(row.studentId, lesson.id);
                   const monthBreak =
@@ -413,28 +461,19 @@ export function JournalGrid({
                         onClick={(event) => openPicker(event, rowIndex, colIndex)}
                         onFocus={() => setSelected({ row: rowIndex, col: colIndex })}
                         onKeyDown={(event) => handleKeyDown(event, rowIndex, colIndex)}
-                        aria-label={`${row.name}, ${formatDateShort(lesson.date)}, оценка ${
-                          value ?? "не выставлена"
+                        aria-label={`${row.name}, ${formatDateShort(lesson.date)}, ${
+                          values.length > 0
+                            ? `оценки ${values.join(" и ")}`
+                            : "оценка не выставлена"
                         }`}
                         className={cn(
-                          "mx-auto flex h-9 w-full items-center justify-center text-[15px] font-semibold tabular-nums transition-colors focus:outline-none",
-                          value === null
-                            ? "text-transparent hover:bg-primary/10"
-                            : "hover:brightness-[0.97]",
+                          "flex h-9 w-full items-center justify-center transition-colors focus:outline-none",
+                          values.length === 0 && "hover:bg-primary/10",
                           isSelected && "ring-2 ring-inset ring-primary",
                           canEdit ? "cursor-pointer" : "cursor-default",
                         )}
                       >
-                        <span
-                          key={settled[key] ?? 0}
-                          className={cn(
-                            "flex h-7 w-9 items-center justify-center rounded",
-                            value !== null && gradeColorClasses(value),
-                            value !== null && settled[key] && "animate-ink-settle",
-                          )}
-                        >
-                          {value ?? "·"}
-                        </span>
+                        <CellGrades values={values} settleKey={settled[key] ?? 0} />
                       </button>
                     </td>
                   );
@@ -475,9 +514,7 @@ export function JournalGrid({
                 Средний балл класса
               </th>
               {lessons.map((lesson, colIndex) => {
-                const values = rows
-                  .map((_, rowIndex) => valueAt(rowIndex, colIndex))
-                  .filter((value): value is number => value !== null);
+                const values = rows.flatMap((_, rowIndex) => valuesAt(rowIndex, colIndex));
                 return (
                   <td
                     key={lesson.id}
@@ -506,24 +543,24 @@ export function JournalGrid({
         lessons={lessons}
         rows={rows}
         canEdit={canEdit}
-        valueAt={valueAt}
+        valuesAt={valuesAt}
         rowStats={rowStats}
-        onPick={(rowIndex, colIndex, value) => commitGrade(rowIndex, colIndex, value)}
-        onRemove={(rowIndex, colIndex) => removeGrade(rowIndex, colIndex)}
+        onPick={(rowIndex, colIndex, value, slot) => commitGrade(rowIndex, colIndex, value, slot)}
+        onRemove={(rowIndex, colIndex, slot) => removeGrade(rowIndex, colIndex, slot)}
       />
 
       {picker && canEdit && (
         <GradePicker
           x={picker.x}
           y={picker.y}
-          current={valueAt(picker.row, picker.col)}
-          onPick={(value) => {
-            commitGrade(picker.row, picker.col, value);
+          values={valuesAt(picker.row, picker.col)}
+          onPick={(value, slot) => {
+            commitGrade(picker.row, picker.col, value, slot);
             setPicker(null);
             focusCell(picker.row, picker.col);
           }}
-          onRemove={() => {
-            removeGrade(picker.row, picker.col);
+          onRemove={(slot) => {
+            removeGrade(picker.row, picker.col, slot);
             setPicker(null);
             focusCell(picker.row, picker.col);
           }}
@@ -536,6 +573,32 @@ export function JournalGrid({
   );
 }
 
+/** Содержимое клетки: пусто, «8» или «10/9». */
+function CellGrades({ values, settleKey }: { values: number[]; settleKey: number }) {
+  if (values.length === 0) {
+    return <span className="text-transparent">·</span>;
+  }
+
+  return (
+    <span key={settleKey} className="animate-ink-settle flex items-center">
+      {values.map((value, index) => (
+        <span key={index} className="flex items-center">
+          {index > 0 && <span className="px-px text-[11px] text-muted-foreground">/</span>}
+          <span
+            className={cn(
+              "flex h-7 items-center justify-center rounded font-semibold tabular-nums",
+              values.length > 1 ? "w-[1.6rem] text-[13px]" : "w-9 text-[15px]",
+              gradeColorClasses(value),
+            )}
+          >
+            {value}
+          </span>
+        </span>
+      ))}
+    </span>
+  );
+}
+
 /**
  * Мобильный режим: сначала выбираем урок, потом идём по списку учеников.
  * Таблица на 390px нечитаема, а этот экран позволяет реально вести журнал с телефона.
@@ -544,7 +607,7 @@ function MobileLessonBoard({
   lessons,
   rows,
   canEdit,
-  valueAt,
+  valuesAt,
   rowStats,
   onPick,
   onRemove,
@@ -552,10 +615,10 @@ function MobileLessonBoard({
   lessons: GridLesson[];
   rows: GridRow[];
   canEdit: boolean;
-  valueAt: (row: number, col: number) => number | null;
+  valuesAt: (row: number, col: number) => number[];
   rowStats: { average: number | null; year: number | null }[];
-  onPick: (row: number, col: number, value: number) => void;
-  onRemove: (row: number, col: number) => void;
+  onPick: (row: number, col: number, value: number, slot: number) => void;
+  onRemove: (row: number, col: number, slot: number) => void;
 }) {
   const [colIndex, setColIndex] = useState(() => Math.max(0, lessons.length - 1));
   const [openRow, setOpenRow] = useState<number | null>(null);
@@ -592,7 +655,7 @@ function MobileLessonBoard({
 
       <ul className="divide-y divide-rule overflow-hidden rounded-lg border border-rule-strong bg-card">
         {rows.map((row, rowIndex) => {
-          const value = valueAt(rowIndex, colIndex);
+          const values = valuesAt(rowIndex, colIndex);
           const isOpen = openRow === rowIndex;
 
           return (
@@ -613,52 +676,79 @@ function MobileLessonBoard({
                   onClick={() => canEdit && setOpenRow(isOpen ? null : rowIndex)}
                   disabled={!canEdit}
                   aria-expanded={isOpen}
-                  aria-label={`Оценка ученика ${row.name}: ${value ?? "не выставлена"}`}
+                  aria-label={`Оценки ученика ${row.name}: ${
+                    values.length > 0 ? values.join(" и ") : "не выставлены"
+                  }`}
                   className={cn(
-                    "flex h-11 w-14 shrink-0 items-center justify-center rounded-md text-base font-bold tabular-nums transition-transform active:scale-95",
-                    value === null
-                      ? "border border-dashed border-input text-muted-foreground"
-                      : gradeColorClasses(value),
+                    "flex h-11 min-w-[3.5rem] shrink-0 items-center justify-center rounded-md px-1.5 text-base font-bold tabular-nums transition-transform active:scale-95",
+                    values.length === 0 &&
+                      "border border-dashed border-input text-muted-foreground",
                     isOpen && "ring-2 ring-primary",
                   )}
                 >
-                  {value ?? "—"}
+                  {values.length === 0
+                    ? "—"
+                    : values.map((value, index) => (
+                        <span key={index} className="flex items-center">
+                          {index > 0 && <span className="px-0.5 text-xs opacity-60">/</span>}
+                          <span
+                            className={cn(
+                              "flex h-8 w-8 items-center justify-center rounded",
+                              gradeColorClasses(value),
+                            )}
+                          >
+                            {value}
+                          </span>
+                        </span>
+                      ))}
                 </button>
               </div>
 
               {isOpen && canEdit && (
-                <div className="animate-fade-in border-t border-rule bg-secondary/40 p-2.5">
-                  <div className="grid grid-cols-5 gap-1.5">
-                    {GRADE_BUTTONS.map((grade) => (
-                      <button
-                        key={grade}
-                        type="button"
-                        onClick={() => {
-                          onPick(rowIndex, colIndex, grade);
-                          setOpenRow(null);
-                        }}
-                        className={cn(
-                          "focus-ring h-11 rounded-md text-base font-bold tabular-nums",
-                          gradeColorClasses(grade),
-                          value === grade && "ring-2 ring-primary",
+                <div className="animate-fade-in space-y-3 border-t border-rule bg-secondary/40 p-2.5">
+                  {Array.from({ length: MAX_GRADES_PER_LESSON }).map((_, slot) => {
+                    const disabled = slot > values.length;
+                    return (
+                      <div key={slot} className={cn(disabled && "opacity-40")}>
+                        <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                          {slot === 0 ? "Оценка" : "Вторая оценка за этот урок"}
+                        </p>
+                        <div className="grid grid-cols-5 gap-1.5">
+                          {GRADE_BUTTONS.map((grade) => (
+                            <button
+                              key={grade}
+                              type="button"
+                              disabled={disabled}
+                              onClick={() => {
+                                onPick(rowIndex, colIndex, grade, slot);
+                                if (slot > 0) setOpenRow(null);
+                              }}
+                              className={cn(
+                                "focus-ring h-11 rounded-md text-base font-bold tabular-nums disabled:cursor-not-allowed",
+                                gradeColorClasses(grade),
+                                values[slot] === grade && "ring-2 ring-primary",
+                              )}
+                            >
+                              {grade}
+                            </button>
+                          ))}
+                        </div>
+                        {values[slot] !== undefined && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              onRemove(rowIndex, colIndex, slot);
+                              setOpenRow(null);
+                            }}
+                            className="focus-ring mt-1.5 flex h-9 w-full items-center justify-center gap-1.5 rounded-md text-sm text-muted-foreground"
+                          >
+                            <Eraser className="h-4 w-4" aria-hidden />
+                            Убрать {slot === 0 ? "оценку" : "вторую оценку"}
+                          </button>
                         )}
-                      >
-                        {grade}
-                      </button>
-                    ))}
-                  </div>
-                  <button
-                    type="button"
-                    disabled={value === null}
-                    onClick={() => {
-                      onRemove(rowIndex, colIndex);
-                      setOpenRow(null);
-                    }}
-                    className="focus-ring mt-2 flex h-10 w-full items-center justify-center gap-1.5 rounded-md text-sm text-muted-foreground disabled:opacity-40"
-                  >
-                    <Eraser className="h-4 w-4" aria-hidden />
-                    Удалить оценку
-                  </button>
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </li>
@@ -687,23 +777,25 @@ function EmptyBoard({
   );
 }
 
+/** Выбор оценки мышью: отдельный ряд цифр для первой и для второй оценки. */
 function GradePicker({
   x,
   y,
-  current,
+  values,
   onPick,
   onRemove,
   onClose,
 }: {
   x: number;
   y: number;
-  current: number | null;
-  onPick: (value: number) => void;
-  onRemove: () => void;
+  values: number[];
+  onPick: (value: number, slot: number) => void;
+  onRemove: (slot: number) => void;
   onClose: () => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const [mounted, setMounted] = useState(false);
+  const [showSecond, setShowSecond] = useState(values.length > 1);
 
   useEffect(() => setMounted(true), []);
 
@@ -728,8 +820,27 @@ function GradePicker({
 
   if (!mounted) return null;
 
-  const left = Math.min(Math.max(x, 130), window.innerWidth - 130);
-  const top = Math.min(y, window.innerHeight - 150);
+  const left = Math.min(Math.max(x, 140), window.innerWidth - 140);
+  const top = Math.min(y, window.innerHeight - (showSecond ? 250 : 175));
+
+  const digits = (slot: number) => (
+    <div className="grid grid-cols-5 gap-1">
+      {GRADE_BUTTONS.map((value) => (
+        <button
+          key={value}
+          type="button"
+          onClick={() => onPick(value, slot)}
+          className={cn(
+            "focus-ring h-9 w-9 rounded text-sm font-bold tabular-nums transition-transform hover:scale-110",
+            gradeColorClasses(value),
+            values[slot] === value && "ring-2 ring-primary",
+          )}
+        >
+          {value}
+        </button>
+      ))}
+    </div>
+  );
 
   return createPortal(
     <div
@@ -739,31 +850,37 @@ function GradePicker({
       className="animate-pop-in fixed z-50 -translate-x-1/2 rounded-lg border border-rule-strong bg-card p-2 shadow-lg"
       style={{ left, top }}
     >
-      <div className="grid grid-cols-5 gap-1">
-        {GRADE_BUTTONS.map((value) => (
-          <button
-            key={value}
-            type="button"
-            onClick={() => onPick(value)}
-            className={cn(
-              "focus-ring h-9 w-9 rounded text-sm font-bold tabular-nums transition-transform hover:scale-110",
-              gradeColorClasses(value),
-              current === value && "ring-2 ring-primary",
-            )}
-          >
-            {value}
-          </button>
-        ))}
-      </div>
-      <button
-        type="button"
-        onClick={onRemove}
-        disabled={current === null}
-        className="focus-ring mt-1.5 flex w-full items-center justify-center gap-1.5 rounded px-2 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted-foreground"
-      >
-        <Eraser className="h-3.5 w-3.5" aria-hidden />
-        Удалить оценку
-      </button>
+      {digits(0)}
+
+      {values[0] !== undefined && !showSecond && (
+        <button
+          type="button"
+          onClick={() => setShowSecond(true)}
+          className="focus-ring mt-1.5 w-full rounded px-2 py-1.5 text-xs font-medium text-primary hover:bg-primary/10"
+        >
+          + вторая оценка за урок
+        </button>
+      )}
+
+      {showSecond && (
+        <div className="mt-2 border-t border-rule pt-2">
+          <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+            Вторая оценка
+          </p>
+          {digits(1)}
+        </div>
+      )}
+
+      {values.length > 0 && (
+        <button
+          type="button"
+          onClick={() => onRemove(values.length - 1)}
+          className="focus-ring mt-1.5 flex w-full items-center justify-center gap-1.5 rounded px-2 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
+        >
+          <Eraser className="h-3.5 w-3.5" aria-hidden />
+          Убрать {values.length > 1 ? "вторую оценку" : "оценку"}
+        </button>
+      )}
     </div>,
     document.body,
   );

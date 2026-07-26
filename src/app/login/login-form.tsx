@@ -26,14 +26,16 @@ export function LoginForm() {
   return (
     <form action={formAction} className="space-y-4">
       <div className="space-y-1.5">
-        <Label htmlFor="email">E-mail</Label>
+        <Label htmlFor="username">Логин</Label>
         <Input
-          id="email"
-          name="email"
-          type="email"
+          id="username"
+          name="username"
+          type="text"
           autoComplete="username"
-          placeholder="teacher@school.com"
-          defaultValue={state.email}
+          autoCapitalize="none"
+          spellCheck={false}
+          placeholder="ivanova.m.p"
+          defaultValue={state.username}
           required
           autoFocus
         />

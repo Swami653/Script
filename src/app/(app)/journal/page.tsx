@@ -6,10 +6,8 @@ import { JournalGrid } from "@/app/(app)/journal/journal-grid";
 import { JournalToolbar } from "@/app/(app)/journal/journal-toolbar";
 import { requirePageRole } from "@/lib/auth-guards";
 import {
-  academicYearLabel,
   averageColorClasses,
   formatAverage,
-  guessCurrentQuarter,
   isValidQuarter,
   QUARTER_LABELS,
   type Quarter,
@@ -20,19 +18,31 @@ import {
   getQuartersWithLessons,
   getSubjects,
 } from "@/lib/queries";
+import { currentQuarter } from "@/lib/quarters";
 import { GRADE_EDITOR_ROLES } from "@/lib/roles";
+import { formatYear, getActiveYear, getKnownYears, getQuarterPeriods } from "@/lib/school-year";
 import { pluralize } from "@/lib/utils";
 
 export const metadata: Metadata = { title: "Журнал класса" };
 
-type SearchParams = Promise<{ subject?: string; quarter?: string; class?: string }>;
+type SearchParams = Promise<{
+  subject?: string;
+  quarter?: string;
+  class?: string;
+  year?: string;
+}>;
 
 export default async function JournalPage({ searchParams }: { searchParams: SearchParams }) {
   // Серверная проверка роли: ученик сюда не попадёт даже по прямой ссылке.
   const user = await requirePageRole(GRADE_EDITOR_ROLES);
 
   const params = await searchParams;
-  const [subjects, classNames] = await Promise.all([getSubjects(), getClassNames()]);
+  const [subjects, classNames, knownYears, activeYear] = await Promise.all([
+    getSubjects(),
+    getClassNames(),
+    getKnownYears(),
+    getActiveYear(),
+  ]);
 
   if (subjects.length === 0) {
     return (
@@ -43,24 +53,30 @@ export default async function JournalPage({ searchParams }: { searchParams: Sear
     );
   }
 
+  const requestedYear = Number(params.year);
+  const year = knownYears.includes(requestedYear) ? requestedYear : activeYear;
+
   const subjectId =
     subjects.find((subject) => subject.id === params.subject)?.id ?? subjects[0]!.id;
   const subjectName = subjects.find((subject) => subject.id === subjectId)!.name;
 
+  const periods = await getQuarterPeriods(year);
+
   const requestedQuarter = Number(params.quarter);
   const quarter: Quarter = isValidQuarter(requestedQuarter)
     ? (requestedQuarter as Quarter)
-    : await defaultQuarter(subjectId);
+    : await defaultQuarter(subjectId, year, periods);
 
   const className = params.class && classNames.includes(params.class) ? params.class : null;
 
-  const data = await getJournalData(subjectId, quarter, className);
+  const data = await getJournalData(subjectId, quarter, year, className);
 
   return (
     <div className="space-y-4">
       <header>
         <p className="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">
-          {academicYearLabel()} учебный год
+          {formatYear(year)} учебный год
+          {year !== activeYear && " · архив"}
         </p>
         <h1 className="mt-1 text-[1.75rem] font-extrabold leading-tight tracking-tight">
           {subjectName}
@@ -100,6 +116,9 @@ export default async function JournalPage({ searchParams }: { searchParams: Sear
         quarter={quarter}
         classNames={classNames}
         className={className}
+        years={knownYears}
+        year={year}
+        hasPeriods={periods.length > 0}
       />
 
       <JournalGrid
@@ -114,7 +133,12 @@ export default async function JournalPage({ searchParams }: { searchParams: Sear
           studentId: row.student.id,
           name: row.student.name,
           className: row.student.className,
-          cells: row.cells,
+          cells: Object.fromEntries(
+            Object.entries(row.cells).map(([lessonId, grades]) => [
+              lessonId,
+              grades.sort((a, b) => a.slot - b.slot).map((grade) => grade.value),
+            ]),
+          ),
           quarterAverages: row.quarterAverages,
         }))}
       />
@@ -123,15 +147,23 @@ export default async function JournalPage({ searchParams }: { searchParams: Sear
 }
 
 /**
- * Четверть по умолчанию: текущая по календарю, а если в ней ещё нет уроков —
- * последняя четверть, в которой уроки есть (иначе учитель видит пустой журнал).
+ * Четверть по умолчанию: та, что идёт сейчас по заданным учителем границам.
+ * Если границы не заданы или в четверти нет уроков — последняя четверть с уроками.
  */
-async function defaultQuarter(subjectId: string): Promise<Quarter> {
-  const guess = guessCurrentQuarter();
-  const filled = await getQuartersWithLessons(subjectId);
-  if (filled.length === 0 || filled.includes(guess)) return guess;
-  const last = filled[filled.length - 1]!;
-  return isValidQuarter(last) ? (last as Quarter) : guess;
+async function defaultQuarter(
+  subjectId: string,
+  year: number,
+  periods: { quarter: number; startDate: Date; endDate: Date }[],
+): Promise<Quarter> {
+  const filled = await getQuartersWithLessons(subjectId, year);
+  const byCalendar = currentQuarter(periods);
+
+  if (byCalendar && (filled.length === 0 || filled.includes(byCalendar))) return byCalendar;
+  if (filled.length > 0) {
+    const last = filled[filled.length - 1]!;
+    if (isValidQuarter(last)) return last as Quarter;
+  }
+  return byCalendar ?? 1;
 }
 
 function EmptyState({ title, description }: { title: string; description: string }) {

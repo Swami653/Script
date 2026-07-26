@@ -17,6 +17,14 @@ export const MIN_GRADE = 1;
 export const MAX_GRADE = 10;
 export const QUARTERS = [1, 2, 3, 4] as const;
 
+/**
+ * Сколько оценок помещается в одну клетку журнала.
+ * За контрольную учитель иногда ставит две оценки — «10/9». Это ДВЕ отдельные
+ * оценки за один урок, а не дробная: каждая по-прежнему целая от 1 до 10
+ * и каждая отдельно участвует в среднем балле.
+ */
+export const MAX_GRADES_PER_LESSON = 2;
+
 export type Quarter = (typeof QUARTERS)[number];
 
 /** Оценка: целое число строго 1..10. */
@@ -25,6 +33,13 @@ export const gradeValueSchema = z
   .int("Оценка должна быть целым числом")
   .min(MIN_GRADE, `Минимальная оценка — ${MIN_GRADE}`)
   .max(MAX_GRADE, `Максимальная оценка — ${MAX_GRADE}`);
+
+/** Позиция оценки в клетке: 0 — первая, 1 — вторая. */
+export const gradeSlotSchema = z
+  .number({ invalid_type_error: "Позиция оценки должна быть числом" })
+  .int("Позиция оценки должна быть целым числом")
+  .min(0, "Позиция оценки должна быть от 0")
+  .max(MAX_GRADES_PER_LESSON - 1, `За один урок можно поставить не больше ${MAX_GRADES_PER_LESSON} оценок`);
 
 /** Четверть: целое число строго 1..4. */
 export const quarterSchema = z
@@ -69,6 +84,12 @@ export function yearGrade(quarterAverages: readonly (number | null)[]): number |
   const avg = filled.reduce((acc, v) => acc + v, 0) / filled.length;
   const rounded = Math.round(roundTo(avg, 4));
   return Math.min(MAX_GRADE, Math.max(MIN_GRADE, rounded));
+}
+
+/** Клетка журнала: «10/9» для двух оценок, «8» для одной, «—» если пусто. */
+export function formatCellGrades(values: readonly number[]): string {
+  if (values.length === 0) return "—";
+  return values.join("/");
 }
 
 /** Красивый вывод среднего балла: 7.45 -> "7.45", null -> "—". */

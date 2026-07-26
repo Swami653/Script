@@ -14,7 +14,8 @@ import { asRole, ROLE_HOME, type Role } from "@/lib/roles";
 export type SessionUser = {
   id: string;
   name: string;
-  email: string;
+  /** Логин для входа. Почта необязательна и здесь не участвует. */
+  username: string;
   role: Role;
   className: string | null;
 };
@@ -43,7 +44,7 @@ export async function getCurrentUser(): Promise<SessionUser | null> {
   return {
     id: session.user.id,
     name: session.user.name ?? "",
-    email: session.user.email ?? "",
+    username: session.user.username ?? "",
     role: asRole(session.user.role),
     className: session.user.className ?? null,
   };

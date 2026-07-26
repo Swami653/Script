@@ -15,9 +15,18 @@
   проверок вида `if (value > 0 && value < 11)` — используй схему.
 - Валидация на клиенте не считается защитой. Клиент может прислать что угодно.
 
+**«10/9» — это НЕ дробная оценка**, а две отдельные целые оценки за один урок
+(`Grade.slot` = 0 и 1, максимум `MAX_GRADES_PER_LESSON`). Каждая идёт в средний балл
+самостоятельно. Не вводи дробные значения ради такой записи.
+
 ### 1.2. Учебный год — ровно 4 четверти
 
 Четверть — целое число **1, 2, 3 или 4** (`quarterSchema`, константа `QUARTERS`).
+
+Границы четвертей задаёт учитель (`QuarterPeriod`, раздел `/journal/year`), а активный
+учебный год лежит в `AppSetting["activeAcademicYear"]`. Четверть и год нового урока
+выводит СЕРВЕР из даты (`src/lib/actions/lessons.ts`) — клиентскому значению доверять
+нельзя. Данные разных лет не смешиваются: `Lesson.year` и `Grade.year` есть в каждом запросе.
 
 Расчёты (реализованы в `src/lib/grades.ts`, не дублируй их):
 
@@ -69,12 +78,14 @@ export async function someAction(input: unknown) {
 | Роль | Может | Раздел |
 |---|---|---|
 | `ADMIN` | всё управление пользователями, массовый импорт, сброс паролей, + права учителя | `/admin` |
-| `TEACHER` | предметы, уроки, оценки, карточки учеников | `/journal` |
-| `STUDENT` | только собственный дневник, только чтение | `/student` |
+| `TEACHER` | предметы, уроки, оценки, карточки учеников, границы четвертей и учебный год | `/journal` |
+| `STUDENT` | только собственный дневник и разбор по предмету, только чтение | `/student` |
+
+Вход — **по логину** (`User.username`), почта необязательна. Логины генерируются
+транслитерацией ФИО (`ivanov.i.i`), см. `src/lib/students-import.ts`.
 
 Роли объявлены в `src/lib/roles.ts` (`ROLES`, `Role`, `GRADE_EDITOR_ROLES`).
-**SQLite не поддерживает `enum` в Prisma**, поэтому в базе роль — строка,
-а типобезопасность даёт `asRole()` / `isRole()`. Не добавляй `enum` в схему.
+Роль в базе — строка (не `enum`), типобезопасность даёт `asRole()` / `isRole()`.
 
 ---
 
@@ -82,8 +93,9 @@ export async function someAction(input: unknown) {
 
 ```
 prisma/
-  schema.prisma          User · Subject · Lesson · Grade
-  seed.ts                демо-данные (npm run db:seed)
+  schema.prisma          User · Subject · Lesson · Grade · QuarterPeriod · AppSetting
+  migrations/            история изменений схемы (prisma migrate)
+  bootstrap.ts           очистка по RESET_DATA + создание администратора
 src/
   auth.ts                NextAuth: провайдер Credentials + bcrypt
   auth.config.ts         edge-совместимая часть конфигурации (для middleware)
@@ -96,12 +108,16 @@ src/
     queries.ts           чтение данных (журнал, отчёты, статистика)
     prisma.ts            singleton Prisma Client
     csv.ts               экспорт в CSV для Excel
-    students-import.ts   разбор списка ФИО (изоморфный — без node:*)
+    quarters.ts          ★ границы четвертей: какая идёт сейчас, в какую попал урок
+    school-year.ts       активный учебный год (AppSetting) и список известных лет
+    students-import.ts   разбор списка ФИО и генерация логинов (изоморфный)
     password.ts          генерация временных паролей (только сервер)
-    actions/             ★ Server Actions: grades · lessons · subjects · users · auth
+    actions/             ★ Server Actions: grades · lessons · subjects · users · quarters · auth
   app/
     login/               страница входа
     (app)/               общий каркас: журнал, дневник, админка, профиль
+      journal/year/      границы четвертей и активный учебный год
+      student/subject/   разбор оценок ученика по одному предмету
     api/journal/export/  Route Handler: CSV-экспорт с проверкой роли
   components/            UI-компоненты
 ```
@@ -120,11 +136,12 @@ Subject 1─* Lesson 1─* Grade
 
 - `Lesson` — это **столбец журнала**: предмет + дата + четверть (+ тема).
   Уникальность: `@@unique([subjectId, date])` — один урок на дату по предмету.
-- `Grade` — ячейка. Уникальность: `@@unique([studentId, lessonId])` — у ученика
-  не может быть двух оценок за один урок.
-- `Grade.subjectId` и `Grade.quarter` **денормализованы** ради быстрых агрегатов.
-  **Инвариант:** они всегда равны полям своего урока. Заполняй их только значениями
-  из `lesson`, никогда из пользовательского ввода (см. `setGradeAction`).
+- `Grade` — оценка в клетке. Уникальность: `@@unique([studentId, lessonId, slot])`:
+  за один урок допускается до двух оценок (slot 0 и 1) — запись «10/9».
+- `Grade.subjectId`, `Grade.year` и `Grade.quarter` **денормализованы** ради быстрых
+  агрегатов. **Инвариант:** они всегда равны полям своего урока. Заполняй их только
+  значениями из `lesson`, никогда из пользовательского ввода (см. `setGradeAction`).
+- `QuarterPeriod` — границы четверти учебного года, `AppSetting` — активный год.
 
 Даты уроков хранятся как **полночь UTC** (`parseDateInputValue`) и форматируются
 UTC-методами (`formatDateShort`). Не переходи на локальные `getDate()` — дата поедет.
@@ -134,16 +151,16 @@ UTC-методами (`formatDateShort`). Не переходи на локал�
 ## 5. Команды
 
 ```bash
-npm run setup      # prisma generate + db push + seed — первый запуск
+npm run setup      # prisma generate + migrate deploy + администратор — первый запуск
 npm run dev        # разработка
 npm run build      # прод-сборка (включает prisma generate)
 npm run typecheck  # tsc --noEmit
-npm run db:seed    # перезалить демо-данные
+npm run db:deploy  # применить миграции
 npm run db:studio  # Prisma Studio
 ```
 
-Демо-аккаунты после сидинга: `admin@school.com / admin123`,
-`teacher@school.com / teacher123`, `student@school.com / student123`.
+Демо-данных нет. Администратор создаётся из `ADMIN_USERNAME` / `ADMIN_PASSWORD`;
+`RESET_DATA=true` очищает базу целиком — использовать только осознанно.
 
 ---
 
@@ -158,6 +175,19 @@ npm run db:studio  # Prisma Studio
 7. На клиенте: `if (!result.ok) show("error", `${result.status}: ${result.error}`)`.
 
 Никогда не возвращай клиенту `password`, даже хеш.
+
+## 6.1. Пароли и их «просмотр»
+
+Постоянные пароли восстановить нельзя — в базе только bcrypt-хеш, и так и должно быть.
+Чтобы администратор мог раздать пароли классу, введено поле `User.tempPassword`:
+
+- заполняется при создании пользователя, массовом импорте и сбросе пароля;
+- виден администратору в таблице пользователей;
+- **затирается при первом успешном входе** (`src/auth.ts`) и при самостоятельной
+  смене пароля.
+
+Не превращай это в постоянное хранение паролей: пароль, которым пользователь уже
+пользуется, не должен быть виден никому.
 
 ---
 
@@ -179,11 +209,15 @@ npm run db:studio  # Prisma Studio
 
 Схема меняется **только миграциями**: `npx prisma migrate dev --name <что-меняем>`
 локально, а на Vercel их применяет скрипт `vercel-build`
-(`prisma migrate deploy` + идемпотентный `prisma/seed-if-empty.ts`).
+(`prisma migrate deploy` + идемпотентный `prisma/bootstrap.ts`).
 Не вызывай `prisma db push` на боевой базе — потеряешь историю изменений.
 
-Демо-данные (`src/lib/demo-data.ts`) заливаются только в пустую базу.
-`npm run db:seed` очищает таблицы — на бою его запускать нельзя.
+Если из среды разработки нет доступа к базе по TCP (порт 5432 закрыт), миграцию
+можно написать руками в `prisma/migrations/<n>_<имя>/migration.sql` — сборка на
+Vercel применит её сама. Так сделана миграция `1_logins_quarters_multigrade`.
+
+`RESET_DATA=true` в переменных окружения **удаляет все данные** при следующем
+деплое. Ставить только осознанно и сразу убирать.
 
 ## 9. Чего не делать
 

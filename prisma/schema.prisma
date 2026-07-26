@@ -24,10 +24,19 @@ datasource db {
 /// Пользователь системы: администратор, учитель или ученик.
 model User {
   id       String @id @default(cuid())
-  email    String @unique
+  /// Логин для входа. Почта не обязательна — школе достаточно логина.
+  username String @unique
+  /// Необязательная почта (для связи). Уникальна, если указана.
+  email    String? @unique
   name     String
-  /// bcrypt-хеш пароля. Открытый пароль в базе не хранится никогда.
+  /// bcrypt-хеш пароля. Открытый пароль здесь не хранится никогда.
   password String
+  /// Временный пароль, выданный администратором. Виден админу ТОЛЬКО до первого
+  /// входа пользователя, после чего затирается (см. src/auth.ts). Это компромисс
+  /// между «раздать классу пароли» и безопасностью: постоянные пароли не хранятся.
+  tempPassword String?
+  /// Момент первого/последнего успешного входа. null — пользователь ещё не входил.
+  lastLoginAt DateTime?
   /// "ADMIN" | "TEACHER" | "STUDENT" — валидируется на сервере через src/lib/roles.ts
   role     String @default("STUDENT")
   /// Класс ученика, например "9-А". У администраторов и учителей обычно null.
@@ -37,6 +46,9 @@ model User {
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  /// Учебные периоды, заведённые этим учителем.
+  quarterPeriods QuarterPeriod[] @relation("QuarterAuthor")
 
   /// Оценки, полученные пользователем как учеником.
   grades        Grade[]  @relation("StudentGrades")
@@ -63,6 +75,9 @@ model Subject {
 model Lesson {
   id        String   @id @default(cuid())
   date      DateTime
+  /// Учебный год по его началу: 2025 — это 2025/2026.
+  /// Выводится из даты и границ четвертей на сервере, не из пользовательского ввода.
+  year      Int
   /// Четверть: 1, 2, 3 или 4.
   quarter   Int
   topic     String?
@@ -77,7 +92,36 @@ model Lesson {
   grades Grade[]
 
   @@unique([subjectId, date])
-  @@index([subjectId, quarter])
+  @@index([subjectId, year, quarter])
+}
+
+/// Ключ-значение для настроек приложения. Сейчас хранит единственный ключ
+/// "activeAcademicYear" — учебный год, который видят все пользователи.
+model AppSetting {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
+}
+
+/// Границы четверти в учебном году. Задаёт учитель (раздел «Учебный год»).
+model QuarterPeriod {
+  id String @id @default(cuid())
+  /// Учебный год по его началу: 2025 — это 2025/2026.
+  year Int
+  /// Четверть: 1, 2, 3 или 4.
+  quarter Int
+  /// Полночь UTC, как и даты уроков.
+  startDate DateTime
+  endDate   DateTime
+
+  authorId String?
+  author   User?   @relation("QuarterAuthor", fields: [authorId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([year, quarter])
+  @@index([year])
 }
 
 /// Оценка ученика за конкретный урок.
@@ -85,11 +129,16 @@ model Grade {
   id String @id @default(cuid())
   /// ЦЕЛОЕ число от 1 до 10. Проверяется зодом на сервере (src/lib/grades.ts).
   value Int
+  /// Позиция оценки в ячейке: 0 — первая, 1 — вторая («10/9» за одну контрольную).
+  /// Больше двух оценок за урок не допускается — сетка журнала станет нечитаемой.
+  slot Int @default(0)
 
-  /// Денормализованные поля урока — нужны для быстрых агрегатов по четвертям.
-  /// ИНВАРИАНТ: всегда равны lesson.subjectId и lesson.quarter (см. src/lib/actions/grades.ts).
+  /// Денормализованные поля урока — нужны для быстрых агрегатов.
+  /// ИНВАРИАНТ: всегда равны lesson.subjectId, lesson.year и lesson.quarter
+  /// (заполняются только из урока, см. src/lib/actions/grades.ts).
   subjectId String
   subject   Subject @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  year      Int
   quarter   Int
 
   studentId String
@@ -104,8 +153,9 @@ model Grade {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  /// У ученика не может быть двух оценок за один и тот же урок.
-  @@unique([studentId, lessonId])
-  @@index([studentId, subjectId, quarter])
-  @@index([subjectId, quarter])
+  /// У ученика не может быть двух оценок в одной позиции одного урока,
+  /// но может быть две оценки за урок в разных позициях (slot 0 и 1).
+  @@unique([studentId, lessonId, slot])
+  @@index([studentId, subjectId, year, quarter])
+  @@index([subjectId, year, quarter])
 }

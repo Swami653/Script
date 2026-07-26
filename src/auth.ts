@@ -8,13 +8,13 @@ import { prisma } from "@/lib/prisma";
 import { asRole } from "@/lib/roles";
 
 const credentialsSchema = z.object({
-  email: z.string().trim().toLowerCase().email(),
+  username: z.string().trim().toLowerCase().min(1),
   password: z.string().min(1),
 });
 
 /**
  * Фиктивный bcrypt-хеш. Сравниваем с ним пароль, когда пользователь не найден,
- * чтобы время ответа не выдавало существование e-mail (защита от перебора).
+ * чтобы время ответа не выдавало существование логина (защита от перебора).
  */
 const DUMMY_HASH = "$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy";
 
@@ -24,24 +24,26 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
     Credentials({
       name: "credentials",
       credentials: {
-        email: { label: "E-mail", type: "email" },
+        username: { label: "Логин", type: "text" },
         password: { label: "Пароль", type: "password" },
       },
       async authorize(rawCredentials) {
         const parsed = credentialsSchema.safeParse(rawCredentials);
         if (!parsed.success) return null;
 
-        const { email, password } = parsed.data;
+        const { username, password } = parsed.data;
 
         const user = await prisma.user.findUnique({
-          where: { email },
+          where: { username },
           select: {
             id: true,
+            username: true,
             email: true,
             name: true,
             password: true,
             role: true,
             className: true,
+            lastLoginAt: true,
           },
         });
 
@@ -53,10 +55,21 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         const passwordMatches = await bcrypt.compare(password, user.password);
         if (!passwordMatches) return null;
 
+        /**
+         * Первый успешный вход стирает временный пароль: с этого момента
+         * администратор его больше не видит — в базе остаётся только bcrypt-хеш.
+         */
+        await prisma.user.update({
+          where: { id: user.id },
+          data: { lastLoginAt: new Date(), tempPassword: null },
+        });
+
         return {
           id: user.id,
-          email: user.email,
+          // NextAuth хранит поле как `email`; для нас это логин.
+          email: user.email ?? `${user.username}@journal.local`,
           name: user.name,
+          username: user.username,
           role: asRole(user.role),
           className: user.className,
         };

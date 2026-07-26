@@ -1,6 +1,7 @@
 "use client";
 
 import { CalendarPlus, Download, Keyboard, X } from "lucide-react";
+import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useState, useTransition } from "react";
 
@@ -17,12 +18,18 @@ export function JournalToolbar({
   quarter,
   classNames,
   className,
+  years,
+  year,
+  hasPeriods,
 }: {
   subjects: { id: string; name: string }[];
   subjectId: string;
   quarter: Quarter;
   classNames: string[];
   className: string | null;
+  years: number[];
+  year: number;
+  hasPeriods: boolean;
 }) {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -38,7 +45,7 @@ export function JournalToolbar({
     router.push(`/journal?${params.toString()}`);
   }
 
-  const exportHref = `/api/journal/export?subject=${encodeURIComponent(subjectId)}&quarter=${quarter}${
+  const exportHref = `/api/journal/export?subject=${encodeURIComponent(subjectId)}&quarter=${quarter}&year=${year}${
     className ? `&class=${encodeURIComponent(className)}` : ""
   }`;
 
@@ -59,6 +66,23 @@ export function JournalToolbar({
             ))}
           </Select>
         </div>
+
+        {years.length > 1 && (
+          <div className="min-w-[140px] space-y-1.5">
+            <Label htmlFor="year-select">Учебный год</Label>
+            <Select
+              id="year-select"
+              value={String(year)}
+              onChange={(event) => navigate({ year: event.target.value, quarter: null })}
+            >
+              {years.map((item) => (
+                <option key={item} value={item}>
+                  {item}/{item + 1}
+                </option>
+              ))}
+            </Select>
+          </div>
+        )}
 
         <div className="space-y-1.5">
           <Label>Четверть</Label>
@@ -126,6 +150,7 @@ export function JournalToolbar({
         <AddLessonForm
           subjectId={subjectId}
           quarter={quarter}
+          hasPeriods={hasPeriods}
           onDone={(message) => {
             setAddOpen(false);
             show("success", message);
@@ -151,9 +176,22 @@ export function JournalToolbar({
           <Kbd>Enter</Kbd> — выбрать мышью
         </span>
         <span>
-          <Kbd>Del</Kbd> — удалить
+          <Kbd>Shift</Kbd>+цифра — вторая оценка за урок (10/9)
+        </span>
+        <span>
+          <Kbd>Del</Kbd> — убрать оценку
         </span>
       </p>
+
+      {!hasPeriods && (
+        <p className="px-1 text-xs text-muted-foreground">
+          Границы четвертей на {year}/{year + 1} не заданы — четверть у нового урока
+          придётся выбирать вручную.{" "}
+          <Link href="/journal/year" className="font-medium text-primary underline">
+            Задать даты четвертей
+          </Link>
+        </p>
+      )}
 
       <Flash message={flash} onClose={clear} />
     </div>
@@ -171,11 +209,13 @@ function Kbd({ children }: { children: React.ReactNode }) {
 function AddLessonForm({
   subjectId,
   quarter,
+  hasPeriods,
   onDone,
   onError,
 }: {
   subjectId: string;
   quarter: Quarter;
+  hasPeriods: boolean;
   onDone: (message: string) => void;
   onError: (message: string) => void;
 }) {
@@ -193,7 +233,8 @@ function AddLessonForm({
           const result = await createLessonAction({
             subjectId,
             date,
-            quarter: lessonQuarter,
+            // Если границы четвертей заданы, четверть определит сервер по дате.
+            quarter: hasPeriods ? undefined : lessonQuarter,
             topic: topic.trim() || undefined,
           });
           if (!result.ok) {
@@ -217,21 +258,23 @@ function AddLessonForm({
         />
       </div>
 
-      <div className="space-y-1.5">
-        <Label htmlFor="lesson-quarter">Четверть</Label>
-        <Select
-          id="lesson-quarter"
-          value={String(lessonQuarter)}
-          onChange={(event) => setLessonQuarter(Number(event.target.value))}
-          className="w-[130px]"
-        >
-          {QUARTERS.map((item) => (
-            <option key={item} value={item}>
-              {item} четверть
-            </option>
-          ))}
-        </Select>
-      </div>
+      {!hasPeriods && (
+        <div className="space-y-1.5">
+          <Label htmlFor="lesson-quarter">Четверть</Label>
+          <Select
+            id="lesson-quarter"
+            value={String(lessonQuarter)}
+            onChange={(event) => setLessonQuarter(Number(event.target.value))}
+            className="w-[130px]"
+          >
+            {QUARTERS.map((item) => (
+              <option key={item} value={item}>
+                {item} четверть
+              </option>
+            ))}
+          </Select>
+        </div>
+      )}
 
       <div className="min-w-[200px] flex-1 space-y-1.5">
         <Label htmlFor="lesson-topic">Тема урока (необязательно)</Label>
@@ -250,6 +293,7 @@ function AddLessonForm({
 
       <FieldHint className="w-full">
         На одну дату по предмету может быть только один урок.
+        {hasPeriods && " Четверть определяется по дате автоматически."}
       </FieldHint>
     </form>
   );

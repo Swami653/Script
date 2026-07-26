@@ -9,7 +9,7 @@ import { requireRole, requireUser } from "@/lib/auth-guards";
 import { generateTempPassword } from "@/lib/password";
 import { prisma } from "@/lib/prisma";
 import { ROLES, type Role } from "@/lib/roles";
-import { buildStudentEmail, parseStudentNames } from "@/lib/students-import";
+import { buildStudentLogin, parseStudentNames } from "@/lib/students-import";
 
 /** Управление пользователями — только для роли ADMIN. */
 
@@ -23,7 +23,25 @@ const nameSchema = z
   .min(2, "Имя — минимум 2 символа")
   .max(100, "Имя — не длиннее 100 символов");
 
-const emailSchema = z.string().trim().toLowerCase().email("Некорректный e-mail");
+/** Логин: латиница, цифры, точка, дефис и подчёркивание. */
+const usernameSchema = z
+  .string()
+  .trim()
+  .toLowerCase()
+  .min(3, "Логин — минимум 3 символа")
+  .max(40, "Логин — не длиннее 40 символов")
+  .regex(
+    /^[a-z0-9][a-z0-9._-]*$/,
+    "Логин может содержать латинские буквы, цифры, точку, дефис и подчёркивание",
+  );
+
+const emailSchema = z
+  .string()
+  .trim()
+  .toLowerCase()
+  .email("Некорректный e-mail")
+  .optional()
+  .or(z.literal(""));
 
 const passwordSchema = z
   .string()
@@ -38,6 +56,7 @@ const classNameSchema = z
 
 const createUserSchema = z.object({
   name: nameSchema,
+  username: usernameSchema,
   email: emailSchema,
   password: passwordSchema,
   role: z.enum(ROLES),
@@ -46,30 +65,41 @@ const createUserSchema = z.object({
 
 export async function createUserAction(input: {
   name: string;
-  email: string;
+  username: string;
+  email?: string;
   password: string;
   role: string;
   className?: string;
-}): Promise<ActionResult<{ id: string; email: string }>> {
+}): Promise<ActionResult<{ id: string; username: string }>> {
   try {
     await requireRole(ADMIN_ONLY);
     const parsed = createUserSchema.parse(input);
 
     const existing = await prisma.user.findUnique({
-      where: { email: parsed.email },
+      where: { username: parsed.username },
       select: { id: true },
     });
-    if (existing) return actionFail(`Пользователь ${parsed.email} уже существует`, 409);
+    if (existing) return actionFail(`Логин ${parsed.username} уже занят`, 409);
+
+    const email = parsed.email ? parsed.email : null;
+    if (email) {
+      const emailTaken = await prisma.user.findUnique({ where: { email }, select: { id: true } });
+      if (emailTaken) return actionFail(`Почта ${email} уже используется`, 409);
+    }
 
     const user = await prisma.user.create({
       data: {
         name: parsed.name,
-        email: parsed.email,
+        username: parsed.username,
+        email,
         password: await bcrypt.hash(parsed.password, BCRYPT_ROUNDS),
+        // Пароль виден администратору, пока пользователь не вошёл в первый раз.
+        tempPassword: parsed.password,
         role: parsed.role,
         className: parsed.role === "STUDENT" ? parsed.className?.trim() || null : null,
+        mustChangePassword: true,
       },
-      select: { id: true, email: true },
+      select: { id: true, username: true },
     });
 
     revalidatePath("/admin");
@@ -82,7 +112,7 @@ export async function createUserAction(input: {
 
 export type ImportedStudent = {
   name: string;
-  email: string;
+  username: string;
   password: string;
 };
 
@@ -100,8 +130,8 @@ const bulkImportSchema = z.object({
 /**
  * Массовый импорт учеников.
  * Принимает произвольный текст (ФИО по одному на строку или через запятую),
- * создаёт учётные записи и ВОЗВРАЩАЕТ временные пароли — единственный момент,
- * когда их можно увидеть (в базе хранится только bcrypt-хеш).
+ * создаёт учётные записи с логинами и временными паролями. Пароли остаются
+ * видимыми администратору до первого входа ученика.
  */
 export async function bulkImportStudentsAction(input: {
   text: string;
@@ -122,8 +152,8 @@ export async function bulkImportStudentsAction(input: {
       );
     }
 
-    const existingEmails = await prisma.user.findMany({ select: { email: true } });
-    const taken = new Set(existingEmails.map((user) => user.email.toLowerCase()));
+    const existingUsers = await prisma.user.findMany({ select: { username: true } });
+    const taken = new Set(existingUsers.map((user) => user.username.toLowerCase()));
 
     const created: ImportedStudent[] = [];
     const skipped: { name: string; reason: string }[] = [];
@@ -136,23 +166,24 @@ export async function bulkImportStudentsAction(input: {
         continue;
       }
 
-      const email = buildStudentEmail(validated.data, taken);
+      const username = buildStudentLogin(validated.data, taken);
       const password = generateTempPassword();
 
       try {
         await prisma.user.create({
           data: {
             name: validated.data,
-            email,
+            username,
             password: await bcrypt.hash(password, BCRYPT_ROUNDS),
+            tempPassword: password,
             role: "STUDENT",
             className,
             mustChangePassword: true,
           },
         });
-        created.push({ name: validated.data, email, password });
+        created.push({ name: validated.data, username, password });
       } catch {
-        skipped.push({ name, reason: "Не удалось создать (дубликат e-mail)" });
+        skipped.push({ name, reason: "Не удалось создать (логин занят)" });
       }
     }
 
@@ -202,17 +233,20 @@ export async function deleteUserAction(input: {
   }
 }
 
-/** Сброс пароля: возвращает новый временный пароль (показывается один раз). */
+/**
+ * Сброс пароля: возвращает новый временный пароль и сохраняет его так,
+ * чтобы администратор мог посмотреть его в таблице до первого входа.
+ */
 export async function resetPasswordAction(input: {
   userId: string;
-}): Promise<ActionResult<{ password: string; email: string }>> {
+}): Promise<ActionResult<{ password: string; username: string }>> {
   try {
     await requireRole(ADMIN_ONLY);
     const userId = z.string().min(1).parse(input.userId);
 
     const user = await prisma.user.findUnique({
       where: { id: userId },
-      select: { id: true, email: true },
+      select: { id: true, username: true },
     });
     if (!user) return actionFail("Пользователь не найден", 404);
 
@@ -221,12 +255,14 @@ export async function resetPasswordAction(input: {
       where: { id: userId },
       data: {
         password: await bcrypt.hash(password, BCRYPT_ROUNDS),
+        tempPassword: password,
         mustChangePassword: true,
+        lastLoginAt: null,
       },
     });
 
     revalidatePath("/admin");
-    return actionOk({ password, email: user.email }, "Пароль сброшен");
+    return actionOk({ password, username: user.username }, "Пароль сброшен");
   } catch (error) {
     return actionError(error);
   }
@@ -291,6 +327,8 @@ export async function changeOwnPasswordAction(input: {
       where: { id: user.id },
       data: {
         password: await bcrypt.hash(parsed.newPassword, BCRYPT_ROUNDS),
+        // Свой пароль пользователь придумал сам — администратору его не видно.
+        tempPassword: null,
         mustChangePassword: false,
       },
     });

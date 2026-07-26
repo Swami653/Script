@@ -51,7 +51,7 @@ export function BulkImportStudents() {
 
   function copyCredentials() {
     if (!result) return;
-    const lines = result.created.map((s) => `${s.name}\t${s.email}\t${s.password}`).join("\n");
+    const lines = result.created.map((s) => `${s.name}\t${s.username}\t${s.password}`).join("\n");
     navigator.clipboard
       .writeText(`ФИО\tЛогин\tПароль\n${lines}`)
       .then(() => show("success", "Скопировано в буфер обмена"))
@@ -64,7 +64,7 @@ export function BulkImportStudents() {
       "ucheniki-logins.csv",
       toCsv(
         ["ФИО", "Логин", "Временный пароль"],
-        result.created.map((s) => [s.name, s.email, s.password]),
+        result.created.map((s) => [s.name, s.username, s.password]),
       ),
     );
   }
@@ -138,9 +138,10 @@ export function BulkImportStudents() {
 
       {result && (
         <div className="space-y-3">
-          <Alert tone="warning" title="Сохраните пароли — они показываются только один раз">
-            В базе данных хранится только bcrypt-хеш. Если пароль утерян, его можно
-            сбросить в таблице пользователей.
+          <Alert tone="warning" title="Раздайте пароли ученикам">
+            Эти пароли видны и в таблице пользователей — до тех пор, пока ученик
+            не войдёт в первый раз. После первого входа в базе остаётся только
+            bcrypt-хеш, и пароль можно будет лишь сбросить.
           </Alert>
 
           <div className="flex flex-wrap gap-2">
@@ -168,9 +169,9 @@ export function BulkImportStudents() {
               </thead>
               <tbody className="divide-y divide-border">
                 {result.created.map((student) => (
-                  <tr key={student.email}>
+                  <tr key={student.username}>
                     <td className="px-3 py-1.5">{student.name}</td>
-                    <td className="px-3 py-1.5 font-mono text-xs">{student.email}</td>
+                    <td className="px-3 py-1.5 font-mono text-xs">{student.username}</td>
                     <td className="px-3 py-1.5 font-mono text-xs font-semibold">
                       {student.password}
                     </td>

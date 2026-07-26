@@ -85,7 +85,7 @@ export async function GET() {
       prisma.quarterPeriod.findMany({ orderBy: [{ year: "asc" }, { quarter: "asc" }] }),
       // Итоги закрытых четвертей — самая ценная часть архива: ведомость
       // юридически значима и, в отличие от оценок, её нельзя пересчитать.
-      prisma.quarterLock.findMany({ orderBy: { createdAt: "asc" } }),
+      prisma.quarterLock.findMany({ orderBy: { closedAt: "asc" } }),
       prisma.quarterResult.findMany({ orderBy: { createdAt: "asc" } }),
       prisma.debt.findMany({ orderBy: { createdAt: "asc" } }),
       prisma.appSetting.findMany({ orderBy: { key: "asc" } }),

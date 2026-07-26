@@ -7,6 +7,7 @@ import { actionError, actionFail, actionOk, type ActionResult } from "@/lib/acti
 import { lessonRef, logAudit } from "@/lib/audit";
 import { requireRole } from "@/lib/auth-guards";
 import { quarterSchema } from "@/lib/grades";
+import { assertQuarterOpen } from "@/lib/lesson-guards";
 import { prisma } from "@/lib/prisma";
 import { academicYearOf, MAX_GRID_LESSONS, quarterForDate } from "@/lib/quarters";
 import { GRADE_EDITOR_ROLES } from "@/lib/roles";
@@ -62,6 +63,10 @@ export async function createLessonAction(input: {
       );
     }
     const year = matched?.year ?? academicYearOf(date);
+
+    // Урок задним числом в закрытую четверть создать нельзя (423). Проверка —
+    // по вычисленным СЕРВЕРОМ году и четверти, а не по присланным клиентом.
+    await assertQuarterOpen(parsed.subjectId, year, quarter);
 
     // «Один урок на дату» действует только среди живых уроков — уникальность
     // обеспечивает частичный индекс в БД (см. migrations/4_phase2).
@@ -157,11 +162,17 @@ export async function deleteLessonAction(input: {
         date: true,
         topic: true,
         deletedAt: true,
+        subjectId: true,
+        year: true,
+        quarter: true,
         subject: { select: { name: true } },
       },
     });
     if (!lesson) return actionFail("Урок не найден", 404);
     if (lesson.deletedAt) return actionFail("Урок уже в корзине", 400);
+
+    // Урок в корзине выпадает из средних — из закрытой четверти столбец не изъять.
+    await assertQuarterOpen(lesson.subjectId, lesson.year, lesson.quarter);
 
     await prisma.lesson.update({
       where: { id: lessonId },
@@ -202,11 +213,17 @@ export async function restoreLessonAction(input: {
         topic: true,
         deletedAt: true,
         subjectId: true,
+        year: true,
+        quarter: true,
         subject: { select: { name: true } },
       },
     });
     if (!lesson) return actionFail("Урок не найден", 404);
     if (!lesson.deletedAt) return actionFail("Урок не в корзине", 400);
+
+    // Восстановление вносит в средние целый столбец — единственный обход шести
+    // грейд-действий. В закрытую четверть оно запрещено так же, как и они (423).
+    await assertQuarterOpen(lesson.subjectId, lesson.year, lesson.quarter);
 
     // Пока урок лежал в корзине, на его дату могли завести новый —
     // два живых урока на одну дату не допускаются (частичный индекс в БД).
@@ -341,6 +358,9 @@ export async function createLessonGridAction(input: {
         400,
       );
     }
+
+    // Сетка в закрытую четверть запрещена: год и четверть берутся из периода.
+    await assertQuarterOpen(parsed.subjectId, period.year, period.quarter);
 
     /**
      * Предохранитель до материализации дат: число кандидатов считается
@@ -524,10 +544,22 @@ export async function setLessonPlanAction(input: {
 
     const lesson = await prisma.lesson.findUnique({
       where: { id: parsed.lessonId },
-      select: { id: true, date: true, deletedAt: true, subject: { select: { name: true } } },
+      select: {
+        id: true,
+        date: true,
+        deletedAt: true,
+        subjectId: true,
+        year: true,
+        quarter: true,
+        subject: { select: { name: true } },
+      },
     });
     if (!lesson) return actionFail("Урок не найден", 404);
     if (lesson.deletedAt) return actionFail("Урок в корзине — сначала восстановите его", 409);
+
+    // Пометка КР ретроактивно рождает/растворяет авто-долги и меняет списки
+    // мастера — в закрытой четверти запрещена (в отличие от темы и домашки).
+    await assertQuarterOpen(lesson.subjectId, lesson.year, lesson.quarter);
 
     await prisma.lesson.update({
       where: { id: lesson.id },

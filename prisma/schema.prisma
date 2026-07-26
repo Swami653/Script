@@ -58,6 +58,8 @@ model User {
 
   /// Оценки, полученные пользователем как учеником.
   grades        Grade[]  @relation("StudentGrades")
+  /// Долги (несданные работы) пользователя как ученика.
+  debts         Debt[]   @relation("StudentDebts")
   /// Оценки, выставленные пользователем как учителем.
   gradesGiven   Grade[]  @relation("TeacherGrades")
   /// Отметки отсутствия — как у ученика, так и проставленные учителем.
@@ -76,8 +78,10 @@ model Subject {
   name      String   @unique
   createdAt DateTime @default(now())
 
-  lessons Lesson[]
-  grades  Grade[]
+  lessons      Lesson[]
+  grades       Grade[]
+  /// Замки закрытых четвертей этого предмета.
+  quarterLocks QuarterLock[]
 }
 
 /// Урок = один столбец в журнале: предмет + дата + четверть (+ тема).
@@ -110,6 +114,7 @@ model Lesson {
 
   grades   Grade[]
   absences Absence[]
+  debts    Debt[]
 
   // Уникальность «один урок на дату по предмету» действует только для живых
   // уроков и живёт в частичном SQL-индексе Lesson_subjectId_date_live_key
@@ -238,4 +243,74 @@ model Grade {
   @@unique([studentId, lessonId, slot])
   @@index([studentId, subjectId, year, quarter])
   @@index([subjectId, year, quarter])
+}
+
+/// Замок четверти по предмету: строка существует = четверть закрыта.
+/// Переоткрыть может только ADMIN (reopenQuarterAction) — строка удаляется,
+/// снимок QuarterResult уходит каскадом. closedById/closedByName — снимки без FK.
+model QuarterLock {
+  id           String   @id @default(cuid())
+  subjectId    String
+  subject      Subject  @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  year         Int
+  quarter      Int
+  closedAt     DateTime @default(now())
+  closedById   String
+  closedByName String
+
+  results QuarterResult[]
+
+  @@unique([subjectId, year, quarter])
+  @@index([year, quarter])
+}
+
+/// Снимок-ведомость закрытой четверти. Документ: studentId/subjectId — скаляры
+/// БЕЗ FK, имя и класс — снимками (паттерн AuditLog), переживает удаление ученика.
+/// ИНВАРИАНТ: существует только вместе со своим замком (lockId, onDelete: Cascade).
+model QuarterResult {
+  id           String      @id @default(cuid())
+  lockId       String
+  lock         QuarterLock @relation(fields: [lockId], references: [id], onDelete: Cascade)
+  studentId    String
+  studentName  String
+  className    String?
+  subjectId    String
+  year         Int
+  quarter      Int
+  average      Float?
+  /// Четвертная отметка 1–10; NULL — не аттестован. Считается ТОЛЬКО сервером
+  /// через quarterMark() (src/lib/grades.ts) на момент закрытия.
+  finalGrade   Int?
+  gradeCount   Int
+  absenceCount Int
+  createdAt    DateTime    @default(now())
+
+  @@unique([lockId, studentId])
+  @@index([studentId, year])
+}
+
+/// Долг ученика за конкретный урок-работу. origin: "auto" (создан syncControlDebts
+/// за «Н» на контрольной) | "manual" (пометил учитель). Статус «закрыт оценкой»
+/// НЕ хранится — выводится (EXISTS Grade по паре студент+урок); clearedAt —
+/// терминальное прощение учителем (строка не удаляется — надгробие).
+/// ИНВАРИАНТ: subjectId/year/quarter всегда равны полям урока, заполняются только из lesson.
+model Debt {
+  id          String    @id @default(cuid())
+  studentId   String
+  student     User      @relation("StudentDebts", fields: [studentId], references: [id], onDelete: Cascade)
+  lessonId    String
+  lesson      Lesson    @relation(fields: [lessonId], references: [id], onDelete: Cascade)
+  subjectId   String
+  year        Int
+  quarter     Int
+  origin      String    @default("auto")
+  note        String?
+  createdAt   DateTime  @default(now())
+  createdById String?
+  clearedAt   DateTime?
+  clearedById String?
+
+  @@unique([studentId, lessonId])
+  @@index([subjectId, year, quarter])
+  @@index([studentId, year])
 }

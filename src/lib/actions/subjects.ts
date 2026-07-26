@@ -87,6 +87,18 @@ export async function deleteSubjectAction(input: {
     });
     if (!subject) return actionFail("Предмет не найден", 404);
 
+    // Каскад удаления предмета унёс бы оценки закрытых четвертей ВМЕСТЕ с их
+    // замками и официальными ведомостями — единственный обход замка, доступный
+    // учителю. Поэтому предмет с закрытой четвертью удалить нельзя (423).
+    const locks = await prisma.quarterLock.count({ where: { subjectId } });
+    if (locks > 0) {
+      return actionFail(
+        "У предмета есть закрытые четверти — сначала переоткройте их у администратора, " +
+          "иначе официальные ведомости будут удалены",
+        423,
+      );
+    }
+
     await prisma.subject.delete({ where: { id: subjectId } });
 
     revalidatePath("/journal");

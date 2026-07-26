@@ -55,13 +55,14 @@ export async function GET(request: NextRequest) {
     const rows = data.rows.map((row) => [
       row.student.name,
       row.student.className ?? "",
-      // Две оценки за урок выгружаются как «10/9» — так же, как в журнале.
-      ...data.lessons.map((lesson) =>
-        (row.cells[lesson.id] ?? [])
+      // «Н» для отсутствия, «10/9» для двух оценок — как в журнале.
+      ...data.lessons.map((lesson) => {
+        if (row.absentLessons.includes(lesson.id)) return "Н";
+        return (row.cells[lesson.id] ?? [])
           .sort((a, b) => a.slot - b.slot)
           .map((grade) => grade.value)
-          .join("/"),
-      ),
+          .join("/");
+      }),
       formatAverage(row.average),
       row.year ?? "",
     ]);

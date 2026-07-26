@@ -8,6 +8,7 @@ import {
   averageColorClasses,
   formatAverage,
   gradeColorClasses,
+  GRADE_KINDS,
   QUARTERS,
   QUARTER_LABELS,
 } from "@/lib/grades";
@@ -64,6 +65,7 @@ export default async function StudentSubjectPage({
             {detail.student.name}
             {detail.student.className ? ` · ${detail.student.className}` : ""} · оценок:{" "}
             {detail.totalGrades}
+            {detail.totalAbsences > 0 && ` · пропусков: ${detail.totalAbsences}`}
           </p>
         </div>
 
@@ -129,31 +131,53 @@ export default async function StudentSubjectPage({
                 <li
                   key={row.lessonId}
                   className={cn(
-                    "flex items-center gap-3 px-3 py-2.5",
-                    row.values.length === 0 && "bg-secondary/30",
+                    "flex items-start gap-3 px-3 py-2.5",
+                    row.grades.length === 0 && "bg-secondary/30",
                   )}
                 >
-                  <span className="w-28 shrink-0 text-xs tabular-nums text-muted-foreground">
+                  <span className="w-28 shrink-0 pt-0.5 text-xs tabular-nums text-muted-foreground">
                     {formatDateLong(row.date)}
                   </span>
                   <span className="min-w-0 flex-1 text-sm">
-                    {row.topic ?? (
-                      <span className="text-muted-foreground">тема не указана</span>
+                    {row.topic ?? <span className="text-muted-foreground">тема не указана</span>}
+                    {/* Тип и комментарий к оценкам — за что она поставлена */}
+                    {row.grades.some((g) => g.kind !== "regular" || g.comment) && (
+                      <span className="mt-0.5 block text-xs text-muted-foreground">
+                        {row.grades
+                          .map((g) =>
+                            [
+                              g.kind !== "regular" ? GRADE_KINDS[g.kind].label : null,
+                              g.comment,
+                            ]
+                              .filter(Boolean)
+                              .join(" · "),
+                          )
+                          .filter(Boolean)
+                          .join(" | ")}
+                      </span>
                     )}
                   </span>
                   <span className="flex shrink-0 items-center gap-1">
-                    {row.values.length === 0 ? (
+                    {row.absent ? (
+                      <span
+                        className="flex h-8 w-9 items-center justify-center rounded bg-slate-200 text-[15px] font-bold text-slate-600 dark:bg-slate-700 dark:text-slate-200"
+                        title="Отсутствовал"
+                      >
+                        Н
+                      </span>
+                    ) : row.grades.length === 0 ? (
                       <span className="text-xs text-muted-foreground">без оценки</span>
                     ) : (
-                      row.values.map((value, index) => (
+                      row.grades.map((grade, index) => (
                         <span
                           key={index}
                           className={cn(
                             "flex h-8 w-9 items-center justify-center rounded text-[15px] font-bold tabular-nums",
-                            gradeColorClasses(value),
+                            gradeColorClasses(grade.value),
                           )}
+                          title={GRADE_KINDS[grade.kind].label}
                         >
-                          {value}
+                          {grade.value}
                         </span>
                       ))
                     )}

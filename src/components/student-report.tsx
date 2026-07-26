@@ -57,6 +57,13 @@ export function StudentReportView({
               >
                 Год
               </th>
+              <th
+                scope="col"
+                className="w-14 border-b-2 border-rule-strong bg-secondary/40 px-2 py-2 text-center text-[11px] font-semibold uppercase tracking-wide text-muted-foreground"
+                title="Пропусков (отметок «Н») за год"
+              >
+                Н
+              </th>
             </tr>
           </thead>
 
@@ -110,13 +117,16 @@ export function StudentReportView({
                       {subject.year ?? "—"}
                     </span>
                   </td>
+                  <td className="border-b border-rule bg-secondary/30 px-2 text-center text-sm tabular-nums text-muted-foreground">
+                    {subject.absences > 0 ? subject.absences : "—"}
+                  </td>
                 </tr>
               );
             })}
 
             {subjects.length === 0 && (
               <tr>
-                <td colSpan={6} className="px-4 py-8 text-center text-muted-foreground">
+                <td colSpan={7} className="px-4 py-8 text-center text-muted-foreground">
                   Предметы пока не заведены.
                 </td>
               </tr>
@@ -147,6 +157,7 @@ export function StudentReportView({
                     {formatAverage(overallYear)}
                   </span>
                 </td>
+                <td className="border-t-2 border-rule-strong px-2 py-2" />
               </tr>
             </tfoot>
           )}

@@ -5,7 +5,7 @@ import { z } from "zod";
 
 import { actionError, actionFail, actionOk, type ActionResult } from "@/lib/action-result";
 import { requireRole } from "@/lib/auth-guards";
-import { gradeSlotSchema, gradeValueSchema } from "@/lib/grades";
+import { asGradeKind, gradeKindSchema, gradeSlotSchema, gradeValueSchema, weightForKind } from "@/lib/grades";
 import { prisma } from "@/lib/prisma";
 import { GRADE_EDITOR_ROLES } from "@/lib/roles";
 
@@ -26,6 +26,8 @@ const setGradeSchema = z.object({
   lessonId: z.string().min(1, "Не указан урок"),
   slot: gradeSlotSchema,
   value: gradeValueSchema,
+  kind: gradeKindSchema.default("regular"),
+  comment: z.string().trim().max(300, "Комментарий — не длиннее 300 символов").optional(),
 });
 
 const cellSchema = z.object({
@@ -59,6 +61,8 @@ export async function setGradeAction(input: {
   lessonId: string;
   value: unknown;
   slot?: unknown;
+  kind?: unknown;
+  comment?: unknown;
 }): Promise<ActionResult<SavedGrade>> {
   try {
     const teacher = await requireRole(GRADE_EDITOR_ROLES);
@@ -68,7 +72,15 @@ export async function setGradeAction(input: {
       lessonId: input.lessonId,
       value: normalizeNumberInput(input.value),
       slot: normalizeNumberInput(input.slot ?? 0),
+      kind: typeof input.kind === "string" ? input.kind : "regular",
+      comment: typeof input.comment === "string" ? input.comment : undefined,
     });
+
+    // Вес определяет ТИП работы, а не клиент — иначе можно было бы прислать
+    // контрольную с весом 1. Храним вес денормализованно на момент выставления.
+    const kind = asGradeKind(parsed.kind);
+    const weight = weightForKind(kind);
+    const comment = parsed.comment?.trim() || null;
 
     const [lesson, student] = await Promise.all([
       prisma.lesson.findUnique({
@@ -115,6 +127,9 @@ export async function setGradeAction(input: {
       create: {
         value: parsed.value,
         slot: parsed.slot,
+        kind,
+        weight,
+        comment,
         studentId: parsed.studentId,
         lessonId: parsed.lessonId,
         // Денормализованные поля берём ТОЛЬКО из урока — инвариант схемы.
@@ -125,12 +140,20 @@ export async function setGradeAction(input: {
       },
       update: {
         value: parsed.value,
+        kind,
+        weight,
+        comment,
         subjectId: lesson.subjectId,
         quarter: lesson.quarter,
         year: lesson.year,
         teacherId: teacher.id,
       },
       select: { id: true, value: true, slot: true, studentId: true, lessonId: true },
+    });
+
+    // Оценка и «Н» взаимоисключающи: выставили оценку — отметка отсутствия снимается.
+    await prisma.absence.deleteMany({
+      where: { studentId: parsed.studentId, lessonId: parsed.lessonId },
     });
 
     revalidatePath("/journal");
@@ -183,6 +206,73 @@ export async function deleteGradeAction(input: {
     revalidatePath("/student");
 
     return actionOk(null, "Оценка удалена");
+  } catch (error) {
+    return actionError(error);
+  }
+}
+
+/**
+ * Отметить отсутствие ученика на уроке («Н»). Если в клетке были оценки —
+ * они удаляются: ученик либо был, либо нет.
+ */
+export async function setAbsenceAction(input: {
+  studentId: string;
+  lessonId: string;
+}): Promise<ActionResult<null>> {
+  try {
+    const teacher = await requireRole(GRADE_EDITOR_ROLES);
+    const studentId = z.string().min(1).parse(input.studentId);
+    const lessonId = z.string().min(1).parse(input.lessonId);
+
+    const [lesson, student] = await Promise.all([
+      prisma.lesson.findUnique({
+        where: { id: lessonId },
+        select: { id: true, subjectId: true, quarter: true, year: true },
+      }),
+      prisma.user.findUnique({ where: { id: studentId }, select: { id: true, role: true } }),
+    ]);
+    if (!lesson) return actionFail("Урок не найден", 404);
+    if (!student || student.role !== "STUDENT") return actionFail("Ученик не найден", 404);
+
+    await prisma.$transaction([
+      prisma.grade.deleteMany({ where: { studentId, lessonId } }),
+      prisma.absence.upsert({
+        where: { studentId_lessonId: { studentId, lessonId } },
+        create: {
+          studentId,
+          lessonId,
+          subjectId: lesson.subjectId,
+          quarter: lesson.quarter,
+          year: lesson.year,
+          teacherId: teacher.id,
+        },
+        update: { teacherId: teacher.id },
+      }),
+    ]);
+
+    revalidatePath("/journal");
+    revalidatePath("/student");
+    return actionOk(null, "Отмечено отсутствие");
+  } catch (error) {
+    return actionError(error);
+  }
+}
+
+/** Снять отметку отсутствия. */
+export async function clearAbsenceAction(input: {
+  studentId: string;
+  lessonId: string;
+}): Promise<ActionResult<null>> {
+  try {
+    await requireRole(GRADE_EDITOR_ROLES);
+    const studentId = z.string().min(1).parse(input.studentId);
+    const lessonId = z.string().min(1).parse(input.lessonId);
+
+    await prisma.absence.deleteMany({ where: { studentId, lessonId } });
+
+    revalidatePath("/journal");
+    revalidatePath("/student");
+    return actionOk(null, "Отметка снята");
   } catch (error) {
     return actionError(error);
   }

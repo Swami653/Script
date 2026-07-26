@@ -60,6 +60,9 @@ model User {
   grades        Grade[]  @relation("StudentGrades")
   /// Оценки, выставленные пользователем как учителем.
   gradesGiven   Grade[]  @relation("TeacherGrades")
+  /// Отметки отсутствия — как у ученика, так и проставленные учителем.
+  absences        Absence[] @relation("StudentAbsences")
+  absencesMarked  Absence[] @relation("TeacherAbsences")
   /// Уроки, созданные пользователем как учителем.
   lessonsTaught Lesson[] @relation("TeacherLessons")
 
@@ -95,7 +98,8 @@ model Lesson {
   teacherId String?
   teacher   User?   @relation("TeacherLessons", fields: [teacherId], references: [id], onDelete: SetNull)
 
-  grades Grade[]
+  grades   Grade[]
+  absences Absence[]
 
   @@unique([subjectId, date])
   @@index([subjectId, year, quarter])
@@ -130,6 +134,31 @@ model QuarterPeriod {
   @@index([year])
 }
 
+/// Отметка отсутствия ученика на уроке («Н»). В средний балл НЕ входит —
+/// это учёт посещаемости, а не оценка. Одна отметка на ученика и урок.
+model Absence {
+  id String @id @default(cuid())
+
+  studentId String
+  student   User   @relation("StudentAbsences", fields: [studentId], references: [id], onDelete: Cascade)
+
+  lessonId String
+  lesson   Lesson @relation(fields: [lessonId], references: [id], onDelete: Cascade)
+
+  /// Денормализованы из урока ради быстрых агрегатов по посещаемости.
+  subjectId String
+  year      Int
+  quarter   Int
+
+  teacherId String?
+  teacher   User?   @relation("TeacherAbsences", fields: [teacherId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+
+  @@unique([studentId, lessonId])
+  @@index([studentId, subjectId, year, quarter])
+}
+
 /// Оценка ученика за конкретный урок.
 model Grade {
   id String @id @default(cuid())
@@ -138,6 +167,13 @@ model Grade {
   /// Позиция оценки в ячейке: 0 — первая, 1 — вторая («10/9» за одну контрольную).
   /// Больше двух оценок за урок не допускается — сетка журнала станет нечитаемой.
   slot Int @default(0)
+  /// Тип работы: "regular" | "oral" | "homework" | "control" (см. src/lib/grades.ts).
+  kind String @default("regular")
+  /// Вес оценки в среднем балле. Денормализован из типа (контрольная весит больше),
+  /// чтобы изменение таблицы весов не переписывало историю. Считается на сервере.
+  weight Int @default(1)
+  /// Необязательный комментарий учителя: за что оценка.
+  comment String?
 
   /// Денормализованные поля урока — нужны для быстрых агрегатов.
   /// ИНВАРИАНТ: всегда равны lesson.subjectId, lesson.year и lesson.quarter

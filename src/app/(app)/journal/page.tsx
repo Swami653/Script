@@ -136,9 +136,17 @@ export default async function JournalPage({ searchParams }: { searchParams: Sear
           cells: Object.fromEntries(
             Object.entries(row.cells).map(([lessonId, grades]) => [
               lessonId,
-              grades.sort((a, b) => a.slot - b.slot).map((grade) => grade.value),
+              grades
+                .sort((a, b) => a.slot - b.slot)
+                .map((grade) => ({
+                  value: grade.value,
+                  weight: grade.weight,
+                  kind: grade.kind,
+                  comment: grade.comment,
+                })),
             ]),
           ),
+          absentLessons: row.absentLessons,
           quarterAverages: row.quarterAverages,
         }))}
       />

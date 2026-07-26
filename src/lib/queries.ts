@@ -1,5 +1,13 @@
 import { ForbiddenError, type SessionUser } from "@/lib/auth-guards";
-import { averageGrade, QUARTERS, yearGrade, type Quarter } from "@/lib/grades";
+import {
+  asGradeKind,
+  averageGrade,
+  QUARTERS,
+  weightedAverage,
+  yearGrade,
+  type GradeKind,
+  type Quarter,
+} from "@/lib/grades";
 import { prisma } from "@/lib/prisma";
 
 /**
@@ -7,8 +15,9 @@ import { prisma } from "@/lib/prisma";
  * уже выполнила requirePageRole()/requireRole(); там, где данные принадлежат
  * конкретному ученику, дополнительно проверяется владелец.
  *
- * Всё, что связано с оценками, ограничено учебным годом: 2025/2026 и 2027/2028
- * не должны смешиваться в одной таблице.
+ * Средний балл за четверть — ВЗВЕШЕННЫЙ (контрольная весит больше, см. grades.ts).
+ * Отметка «Н» (Absence) в средний балл не входит — это учёт посещаемости.
+ * Всё ограничено учебным годом: 2025/2026 и 2027/2028 не смешиваются.
  */
 
 export type JournalLesson = {
@@ -19,18 +28,29 @@ export type JournalLesson = {
 };
 
 /** Оценка в клетке. slot: 0 — первая, 1 — вторая («10/9»). */
-export type CellGrade = { id: string; value: number; slot: number };
+export type CellGrade = {
+  id: string;
+  value: number;
+  slot: number;
+  kind: GradeKind;
+  weight: number;
+  comment: string | null;
+};
 
 export type JournalRow = {
   student: { id: string; name: string; className: string | null };
   /** lessonId -> оценки клетки, отсортированные по позиции */
   cells: Record<string, CellGrade[]>;
-  /** Средний балл за выбранную четверть */
+  /** lessonId, на которых у ученика отмечено «Н» */
+  absentLessons: string[];
+  /** Взвешенный средний балл за выбранную четверть */
   average: number | null;
   /** Средние баллы по всем 4 четвертям (для колонки «Год») */
   quarterAverages: (number | null)[];
   /** Итоговая годовая оценка по предмету */
   year: number | null;
+  /** Пропусков за выбранную четверть */
+  absencesInQuarter: number;
 };
 
 export type JournalData = {
@@ -61,10 +81,7 @@ export async function getStudents(className?: string | null) {
 }
 
 /** Четверти выбранного года, где у предмета есть уроки. */
-export async function getQuartersWithLessons(
-  subjectId: string,
-  year: number,
-): Promise<number[]> {
+export async function getQuartersWithLessons(subjectId: string, year: number): Promise<number[]> {
   const rows = await prisma.lesson.groupBy({
     by: ["quarter"],
     where: { subjectId, year },
@@ -91,7 +108,7 @@ export async function getJournalData(
   year: number,
   className?: string | null,
 ): Promise<JournalData> {
-  const [lessons, students, gradesOfQuarter, gradesOfYear] = await Promise.all([
+  const [lessons, students, gradesOfQuarter, gradesOfYear, absencesOfQuarter] = await Promise.all([
     prisma.lesson.findMany({
       where: { subjectId, quarter, year },
       orderBy: { date: "asc" },
@@ -101,11 +118,24 @@ export async function getJournalData(
     prisma.grade.findMany({
       where: { subjectId, quarter, year },
       orderBy: { slot: "asc" },
-      select: { id: true, value: true, slot: true, studentId: true, lessonId: true },
+      select: {
+        id: true,
+        value: true,
+        slot: true,
+        kind: true,
+        weight: true,
+        comment: true,
+        studentId: true,
+        lessonId: true,
+      },
     }),
     prisma.grade.findMany({
       where: { subjectId, year },
-      select: { value: true, studentId: true, quarter: true },
+      select: { value: true, weight: true, studentId: true, quarter: true },
+    }),
+    prisma.absence.findMany({
+      where: { subjectId, quarter, year },
+      select: { studentId: true, lessonId: true },
     }),
   ]);
 
@@ -113,30 +143,48 @@ export async function getJournalData(
   for (const grade of gradesOfQuarter) {
     const cells = cellsByStudent.get(grade.studentId) ?? {};
     const cell = cells[grade.lessonId] ?? [];
-    cell.push({ id: grade.id, value: grade.value, slot: grade.slot });
+    cell.push({
+      id: grade.id,
+      value: grade.value,
+      slot: grade.slot,
+      kind: asGradeKind(grade.kind),
+      weight: grade.weight,
+      comment: grade.comment,
+    });
     cells[grade.lessonId] = cell;
     cellsByStudent.set(grade.studentId, cells);
   }
 
-  const yearValues = new Map<string, number[][]>();
+  const absentByStudent = new Map<string, string[]>();
+  for (const absence of absencesOfQuarter) {
+    const list = absentByStudent.get(absence.studentId) ?? [];
+    list.push(absence.lessonId);
+    absentByStudent.set(absence.studentId, list);
+  }
+
+  // Взвешенные оценки года, разложенные по четвертям.
+  const yearValues = new Map<string, { value: number; weight: number }[][]>();
   for (const grade of gradesOfYear) {
     const perQuarter = yearValues.get(grade.studentId) ?? [[], [], [], []];
     const index = grade.quarter - 1;
-    if (index >= 0 && index < 4) perQuarter[index]!.push(grade.value);
+    if (index >= 0 && index < 4) perQuarter[index]!.push({ value: grade.value, weight: grade.weight });
     yearValues.set(grade.studentId, perQuarter);
   }
 
   const rows: JournalRow[] = students.map((student) => {
     const cells = cellsByStudent.get(student.id) ?? {};
+    const absentLessons = absentByStudent.get(student.id) ?? [];
     const perQuarter = yearValues.get(student.id) ?? [[], [], [], []];
-    const quarterAverages = perQuarter.map((values) => averageGrade(values));
+    const quarterAverages = perQuarter.map((items) => weightedAverage(items));
 
     return {
       student: { id: student.id, name: student.name, className: student.className },
       cells,
+      absentLessons,
       average: quarterAverages[quarter - 1] ?? null,
       quarterAverages,
       year: yearGrade(quarterAverages),
+      absencesInQuarter: absentLessons.length,
     };
   });
 
@@ -154,10 +202,12 @@ export async function getJournalData(
 export type StudentSubjectReport = {
   subjectId: string;
   subjectName: string;
-  /** Средние баллы по четвертям 1..4 */
+  /** Взвешенные средние баллы по четвертям 1..4 */
   quarterAverages: (number | null)[];
   /** Количество оценок по четвертям — чтобы показать «нет оценок» честно */
   quarterCounts: number[];
+  /** Пропусков по предмету за год */
+  absences: number;
   year: number | null;
 };
 
@@ -169,6 +219,7 @@ export type StudentReport = {
   /** Средний балл за весь год по всем предметам */
   overallYear: number | null;
   totalGrades: number;
+  totalAbsences: number;
 };
 
 /**
@@ -190,31 +241,39 @@ export async function getStudentReport(
   });
   if (!student) return null;
 
-  const [subjects, grades] = await Promise.all([
+  const [subjects, grades, absences] = await Promise.all([
     prisma.subject.findMany({ orderBy: { name: "asc" }, select: { id: true, name: true } }),
     prisma.grade.findMany({
       where: { studentId, year },
-      select: { value: true, quarter: true, subjectId: true },
+      select: { value: true, weight: true, quarter: true, subjectId: true },
+    }),
+    prisma.absence.groupBy({
+      by: ["subjectId"],
+      where: { studentId, year },
+      _count: { _all: true },
     }),
   ]);
 
-  const bySubject = new Map<string, number[][]>();
+  const bySubject = new Map<string, { value: number; weight: number }[][]>();
   for (const grade of grades) {
     const perQuarter = bySubject.get(grade.subjectId) ?? [[], [], [], []];
     const index = grade.quarter - 1;
-    if (index >= 0 && index < 4) perQuarter[index]!.push(grade.value);
+    if (index >= 0 && index < 4) perQuarter[index]!.push({ value: grade.value, weight: grade.weight });
     bySubject.set(grade.subjectId, perQuarter);
   }
 
+  const absenceBySubject = new Map(absences.map((a) => [a.subjectId, a._count._all]));
+
   const subjectReports: StudentSubjectReport[] = subjects.map((subject) => {
     const perQuarter = bySubject.get(subject.id) ?? [[], [], [], []];
-    const quarterAverages = perQuarter.map((values) => averageGrade(values));
+    const quarterAverages = perQuarter.map((items) => weightedAverage(items));
 
     return {
       subjectId: subject.id,
       subjectName: subject.name,
       quarterAverages,
-      quarterCounts: perQuarter.map((values) => values.length),
+      quarterCounts: perQuarter.map((items) => items.length),
+      absences: absenceBySubject.get(subject.id) ?? 0,
       year: yearGrade(quarterAverages),
     };
   });
@@ -234,6 +293,7 @@ export async function getStudentReport(
       subjectReports.map((r) => r.year).filter((v): v is number => v !== null),
     ),
     totalGrades: grades.length,
+    totalAbsences: absences.reduce((sum, a) => sum + a._count._all, 0),
   };
 }
 
@@ -242,22 +302,24 @@ export type SubjectLessonRow = {
   date: Date;
   quarter: number;
   topic: string | null;
-  values: number[];
+  grades: { value: number; kind: GradeKind; comment: string | null }[];
+  absent: boolean;
 };
 
 export type StudentSubjectDetail = {
   student: { id: string; name: string; className: string | null };
   subject: { id: string; name: string };
-  /** Уроки по четвертям: 4 массива, в каждом — уроки с оценками ученика */
+  /** Уроки по четвертям: 4 массива, в каждом — уроки предмета */
   byQuarter: SubjectLessonRow[][];
   quarterAverages: (number | null)[];
   year: number | null;
   totalGrades: number;
+  totalAbsences: number;
 };
 
 /**
- * Оценки ученика по одному предмету: дата урока, тема и оценка за него.
- * Показываются ВСЕ уроки предмета, в том числе без оценки, — так видно пропуски.
+ * Оценки ученика по одному предмету: дата урока, тема, оценки (с типом и
+ * комментарием) и отметки «Н». Показываются ВСЕ уроки предмета — видно пропуски.
  */
 export async function getStudentSubjectDetail(
   studentId: string,
@@ -278,7 +340,7 @@ export async function getStudentSubjectDetail(
   ]);
   if (!student || !subject) return null;
 
-  const [lessons, grades] = await Promise.all([
+  const [lessons, grades, absences] = await Promise.all([
     prisma.lesson.findMany({
       where: { subjectId, year },
       orderBy: { date: "asc" },
@@ -287,33 +349,40 @@ export async function getStudentSubjectDetail(
     prisma.grade.findMany({
       where: { studentId, subjectId, year },
       orderBy: { slot: "asc" },
-      select: { value: true, slot: true, lessonId: true, quarter: true },
+      select: { value: true, weight: true, kind: true, comment: true, lessonId: true, quarter: true },
+    }),
+    prisma.absence.findMany({
+      where: { studentId, subjectId, year },
+      select: { lessonId: true },
     }),
   ]);
 
-  const valuesByLesson = new Map<string, number[]>();
+  const gradesByLesson = new Map<string, typeof grades>();
   for (const grade of grades) {
-    const list = valuesByLesson.get(grade.lessonId) ?? [];
-    list.push(grade.value);
-    valuesByLesson.set(grade.lessonId, list);
+    const list = gradesByLesson.get(grade.lessonId) ?? [];
+    list.push(grade);
+    gradesByLesson.set(grade.lessonId, list);
   }
+  const absentLessons = new Set(absences.map((a) => a.lessonId));
 
   const byQuarter: SubjectLessonRow[][] = [[], [], [], []];
+  const weightedByQuarter: { value: number; weight: number }[][] = [[], [], [], []];
   for (const lesson of lessons) {
     const index = lesson.quarter - 1;
     if (index < 0 || index > 3) continue;
+    const cell = gradesByLesson.get(lesson.id) ?? [];
     byQuarter[index]!.push({
       lessonId: lesson.id,
       date: lesson.date,
       quarter: lesson.quarter,
       topic: lesson.topic,
-      values: valuesByLesson.get(lesson.id) ?? [],
+      grades: cell.map((g) => ({ value: g.value, kind: asGradeKind(g.kind), comment: g.comment })),
+      absent: absentLessons.has(lesson.id),
     });
+    for (const g of cell) weightedByQuarter[index]!.push({ value: g.value, weight: g.weight });
   }
 
-  const quarterAverages = byQuarter.map((rows) =>
-    averageGrade(rows.flatMap((row) => row.values)),
-  );
+  const quarterAverages = weightedByQuarter.map((items) => weightedAverage(items));
 
   return {
     student,
@@ -322,6 +391,7 @@ export async function getStudentSubjectDetail(
     quarterAverages,
     year: yearGrade(quarterAverages),
     totalGrades: grades.length,
+    totalAbsences: absences.length,
   };
 }
 
@@ -335,6 +405,8 @@ export async function getRecentGrades(studentId: string, year: number, take = 12
       id: true,
       value: true,
       quarter: true,
+      kind: true,
+      comment: true,
       subject: { select: { id: true, name: true } },
       lesson: { select: { date: true, topic: true } },
       teacher: { select: { name: true } },

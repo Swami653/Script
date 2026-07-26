@@ -27,6 +27,40 @@ export const MAX_GRADES_PER_LESSON = 2;
 
 export type Quarter = (typeof QUARTERS)[number];
 
+/**
+ * Типы работ и их вес в среднем балле. Контрольная весит больше текущей оценки.
+ * Вес денормализуется в Grade.weight на сервере, чтобы правка этой таблицы
+ * не переписывала уже выставленные оценки.
+ */
+export const GRADE_KINDS = {
+  regular: { label: "Текущая", short: "Тек", weight: 1 },
+  oral: { label: "Устный ответ", short: "Устн", weight: 1 },
+  homework: { label: "Домашняя работа", short: "Дом", weight: 1 },
+  control: { label: "Контрольная", short: "КР", weight: 2 },
+} as const;
+
+export type GradeKind = keyof typeof GRADE_KINDS;
+
+export const GRADE_KIND_KEYS = Object.keys(GRADE_KINDS) as GradeKind[];
+
+export function isGradeKind(value: unknown): value is GradeKind {
+  return typeof value === "string" && value in GRADE_KINDS;
+}
+
+/** Безопасно приводит строку из БД к типу работы (по умолчанию — текущая). */
+export function asGradeKind(value: unknown): GradeKind {
+  return isGradeKind(value) ? value : "regular";
+}
+
+/** Вес по типу работы — единственный источник правды при записи оценки. */
+export function weightForKind(kind: GradeKind): number {
+  return GRADE_KINDS[kind].weight;
+}
+
+export const gradeKindSchema = z
+  .string()
+  .refine(isGradeKind, "Неизвестный тип работы");
+
 /** Оценка: целое число строго 1..10. */
 export const gradeValueSchema = z
   .number({ invalid_type_error: "Оценка должна быть числом" })
@@ -70,6 +104,26 @@ export function averageGrade(values: readonly number[]): number | null {
   if (values.length === 0) return null;
   const sum = values.reduce((acc, v) => acc + v, 0);
   return roundTo(sum / values.length, 2);
+}
+
+/**
+ * Взвешенный средний балл: sum(оценка × вес) / sum(вес), округление до сотых.
+ * Контрольная (вес 2) влияет вдвое сильнее текущей оценки (вес 1).
+ * Возвращает null, если оценок нет.
+ */
+export function weightedAverage(
+  items: readonly { value: number; weight: number }[],
+): number | null {
+  if (items.length === 0) return null;
+  let weighted = 0;
+  let total = 0;
+  for (const { value, weight } of items) {
+    const w = weight > 0 ? weight : 1;
+    weighted += value * w;
+    total += w;
+  }
+  if (total === 0) return null;
+  return roundTo(weighted / total, 2);
 }
 
 /**

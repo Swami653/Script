@@ -1,0 +1,255 @@
+"use client";
+
+import { CalendarPlus, Download, Keyboard, X } from "lucide-react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { useState, useTransition } from "react";
+
+import { Flash, useFlash } from "@/components/flash";
+import { Button } from "@/components/ui/button";
+import { FieldHint, Input, Label, Select } from "@/components/ui/field";
+import { createLessonAction } from "@/lib/actions/lessons";
+import { QUARTERS, type Quarter } from "@/lib/grades";
+import { cn, toDateInputValue } from "@/lib/utils";
+
+export function JournalToolbar({
+  subjects,
+  subjectId,
+  quarter,
+  classNames,
+  className,
+}: {
+  subjects: { id: string; name: string }[];
+  subjectId: string;
+  quarter: Quarter;
+  classNames: string[];
+  className: string | null;
+}) {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const { flash, show, clear } = useFlash();
+  const [addOpen, setAddOpen] = useState(false);
+
+  function navigate(patch: Record<string, string | null>) {
+    const params = new URLSearchParams(searchParams.toString());
+    for (const [key, value] of Object.entries(patch)) {
+      if (value === null || value === "") params.delete(key);
+      else params.set(key, value);
+    }
+    router.push(`/journal?${params.toString()}`);
+  }
+
+  const exportHref = `/api/journal/export?subject=${encodeURIComponent(subjectId)}&quarter=${quarter}${
+    className ? `&class=${encodeURIComponent(className)}` : ""
+  }`;
+
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-end gap-3 rounded-xl border border-border bg-card p-3 shadow-sm">
+        <div className="min-w-[190px] flex-1 space-y-1.5 sm:max-w-xs">
+          <Label htmlFor="subject-select">Предмет</Label>
+          <Select
+            id="subject-select"
+            value={subjectId}
+            onChange={(event) => navigate({ subject: event.target.value })}
+          >
+            {subjects.map((subject) => (
+              <option key={subject.id} value={subject.id}>
+                {subject.name}
+              </option>
+            ))}
+          </Select>
+        </div>
+
+        <div className="space-y-1.5">
+          <Label>Четверть</Label>
+          <div className="flex rounded-md border border-input bg-card p-0.5">
+            {QUARTERS.map((item) => (
+              <button
+                key={item}
+                type="button"
+                onClick={() => navigate({ quarter: String(item) })}
+                aria-pressed={item === quarter}
+                className={cn(
+                  "focus-ring h-8 w-11 rounded text-sm font-medium transition-colors",
+                  item === quarter
+                    ? "bg-primary text-primary-foreground shadow-sm"
+                    : "text-muted-foreground hover:bg-accent hover:text-foreground",
+                )}
+                title={`${item} четверть`}
+              >
+                {item}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {classNames.length > 0 && (
+          <div className="min-w-[130px] space-y-1.5">
+            <Label htmlFor="class-select">Класс</Label>
+            <Select
+              id="class-select"
+              value={className ?? ""}
+              onChange={(event) => navigate({ class: event.target.value || null })}
+            >
+              <option value="">Все классы</option>
+              {classNames.map((name) => (
+                <option key={name} value={name}>
+                  {name}
+                </option>
+              ))}
+            </Select>
+          </div>
+        )}
+
+        <div className="ml-auto flex items-center gap-2">
+          <a
+            href={exportHref}
+            download
+            title="Скачать журнал в CSV — открывается в Excel"
+            className="focus-ring inline-flex h-10 items-center justify-center gap-2 rounded-md border border-input bg-card px-4 text-sm font-medium transition-colors hover:bg-accent"
+          >
+            <Download className="h-4 w-4" aria-hidden />
+            <span className="hidden sm:inline">Экспорт</span>
+          </a>
+          <Button onClick={() => setAddOpen((value) => !value)}>
+            {addOpen ? (
+              <X className="h-4 w-4" aria-hidden />
+            ) : (
+              <CalendarPlus className="h-4 w-4" aria-hidden />
+            )}
+            {addOpen ? "Отмена" : "Добавить урок"}
+          </Button>
+        </div>
+      </div>
+
+      {addOpen && (
+        <AddLessonForm
+          subjectId={subjectId}
+          quarter={quarter}
+          onDone={(message) => {
+            setAddOpen(false);
+            show("success", message);
+            router.refresh();
+          }}
+          onError={(message) => show("error", message)}
+        />
+      )}
+
+      <p className="flex flex-wrap items-center gap-x-3 gap-y-1 px-1 text-xs text-muted-foreground">
+        <span className="inline-flex items-center gap-1.5 font-medium">
+          <Keyboard className="h-3.5 w-3.5" aria-hidden />
+          Горячие клавиши:
+        </span>
+        <span>
+          <Kbd>←</Kbd> <Kbd>→</Kbd> <Kbd>↑</Kbd> <Kbd>↓</Kbd> — перемещение
+        </span>
+        <span>
+          <Kbd>1</Kbd>…<Kbd>9</Kbd>, <Kbd>0</Kbd> = 10 — выставить оценку
+        </span>
+        <span>
+          <Kbd>Enter</Kbd> — выбрать мышью
+        </span>
+        <span>
+          <Kbd>Del</Kbd> — удалить
+        </span>
+      </p>
+
+      <Flash message={flash} onClose={clear} />
+    </div>
+  );
+}
+
+function Kbd({ children }: { children: React.ReactNode }) {
+  return (
+    <kbd className="rounded border border-border bg-muted px-1.5 py-0.5 font-mono text-[10px] text-foreground">
+      {children}
+    </kbd>
+  );
+}
+
+function AddLessonForm({
+  subjectId,
+  quarter,
+  onDone,
+  onError,
+}: {
+  subjectId: string;
+  quarter: Quarter;
+  onDone: (message: string) => void;
+  onError: (message: string) => void;
+}) {
+  const [pending, startTransition] = useTransition();
+  const [date, setDate] = useState(() => toDateInputValue(new Date()));
+  const [topic, setTopic] = useState("");
+  const [lessonQuarter, setLessonQuarter] = useState<number>(quarter);
+
+  return (
+    <form
+      className="animate-fade-in flex flex-wrap items-end gap-3 rounded-xl border border-border bg-muted/40 p-3"
+      onSubmit={(event) => {
+        event.preventDefault();
+        startTransition(async () => {
+          const result = await createLessonAction({
+            subjectId,
+            date,
+            quarter: lessonQuarter,
+            topic: topic.trim() || undefined,
+          });
+          if (!result.ok) {
+            onError(`${result.status}: ${result.error}`);
+            return;
+          }
+          setTopic("");
+          onDone(result.message ?? "Урок добавлен");
+        });
+      }}
+    >
+      <div className="space-y-1.5">
+        <Label htmlFor="lesson-date">Дата урока</Label>
+        <Input
+          id="lesson-date"
+          type="date"
+          value={date}
+          onChange={(event) => setDate(event.target.value)}
+          required
+          className="w-[170px]"
+        />
+      </div>
+
+      <div className="space-y-1.5">
+        <Label htmlFor="lesson-quarter">Четверть</Label>
+        <Select
+          id="lesson-quarter"
+          value={String(lessonQuarter)}
+          onChange={(event) => setLessonQuarter(Number(event.target.value))}
+          className="w-[130px]"
+        >
+          {QUARTERS.map((item) => (
+            <option key={item} value={item}>
+              {item} четверть
+            </option>
+          ))}
+        </Select>
+      </div>
+
+      <div className="min-w-[200px] flex-1 space-y-1.5">
+        <Label htmlFor="lesson-topic">Тема урока (необязательно)</Label>
+        <Input
+          id="lesson-topic"
+          value={topic}
+          onChange={(event) => setTopic(event.target.value)}
+          placeholder="Квадратные уравнения"
+          maxLength={120}
+        />
+      </div>
+
+      <Button type="submit" loading={pending}>
+        Добавить столбец
+      </Button>
+
+      <FieldHint className="w-full">
+        На одну дату по предмету может быть только один урок.
+      </FieldHint>
+    </form>
+  );
+}

@@ -1,0 +1,105 @@
+// Электронный журнал — схема базы данных
+//
+// ВАЖНЫЕ ПРАВИЛА ПРЕДМЕТНОЙ ОБЛАСТИ (см. CLAUDE.md):
+//  * Оценка (Grade.value) — ЦЕЛОЕ число строго от 1 до 10 (10-балльная система).
+//  * Учебный год состоит из 4 четвертей: Lesson.quarter / Grade.quarter ∈ {1,2,3,4}.
+//  * SQLite не поддерживает enum в Prisma, поэтому роль хранится строкой,
+//    а допустимые значения описаны типом Role в src/lib/roles.ts ("ADMIN" | "TEACHER" | "STUDENT").
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+/// Пользователь системы: администратор, учитель или ученик.
+model User {
+  id       String @id @default(cuid())
+  email    String @unique
+  name     String
+  /// bcrypt-хеш пароля. Открытый пароль в базе не хранится никогда.
+  password String
+  /// "ADMIN" | "TEACHER" | "STUDENT" — валидируется на сервере через src/lib/roles.ts
+  role     String @default("STUDENT")
+  /// Класс ученика, например "9-А". У администраторов и учителей обычно null.
+  className String?
+  /// true — пароль выдан автоматически (массовый импорт) и его стоит сменить.
+  mustChangePassword Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  /// Оценки, полученные пользователем как учеником.
+  grades        Grade[]  @relation("StudentGrades")
+  /// Оценки, выставленные пользователем как учителем.
+  gradesGiven   Grade[]  @relation("TeacherGrades")
+  /// Уроки, созданные пользователем как учителем.
+  lessonsTaught Lesson[] @relation("TeacherLessons")
+
+  @@index([role])
+  @@index([className])
+}
+
+/// Учебный предмет (Математика, Физика, ...). Управляется учителем.
+model Subject {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  createdAt DateTime @default(now())
+
+  lessons Lesson[]
+  grades  Grade[]
+}
+
+/// Урок = один столбец в журнале: предмет + дата + четверть (+ тема).
+model Lesson {
+  id        String   @id @default(cuid())
+  date      DateTime
+  /// Четверть: 1, 2, 3 или 4.
+  quarter   Int
+  topic     String?
+  createdAt DateTime @default(now())
+
+  subjectId String
+  subject   Subject @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+
+  teacherId String?
+  teacher   User?   @relation("TeacherLessons", fields: [teacherId], references: [id], onDelete: SetNull)
+
+  grades Grade[]
+
+  @@unique([subjectId, date])
+  @@index([subjectId, quarter])
+}
+
+/// Оценка ученика за конкретный урок.
+model Grade {
+  id String @id @default(cuid())
+  /// ЦЕЛОЕ число от 1 до 10. Проверяется зодом на сервере (src/lib/grades.ts).
+  value Int
+
+  /// Денормализованные поля урока — нужны для быстрых агрегатов по четвертям.
+  /// ИНВАРИАНТ: всегда равны lesson.subjectId и lesson.quarter (см. src/lib/actions/grades.ts).
+  subjectId String
+  subject   Subject @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  quarter   Int
+
+  studentId String
+  student   User   @relation("StudentGrades", fields: [studentId], references: [id], onDelete: Cascade)
+
+  lessonId String
+  lesson   Lesson @relation(fields: [lessonId], references: [id], onDelete: Cascade)
+
+  teacherId String?
+  teacher   User?   @relation("TeacherGrades", fields: [teacherId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  /// У ученика не может быть двух оценок за один и тот же урок.
+  @@unique([studentId, lessonId])
+  @@index([studentId, subjectId, quarter])
+  @@index([subjectId, quarter])
+}

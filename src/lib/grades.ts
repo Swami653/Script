@@ -1,0 +1,121 @@
+import { z } from "zod";
+
+/**
+ * Правила предметной области «Электронный журнал».
+ *
+ *  1. Система оценок — 10-балльная: допустимы ТОЛЬКО целые числа от 1 до 10.
+ *  2. Учебный год состоит из 4 четвертей: 1, 2, 3, 4.
+ *  3. Средний балл за четверть округляется до сотых (например, 7.45).
+ *  4. Годовая оценка = среднее арифметическое средних баллов четвертей,
+ *     округлённое до целого от 1 до 10 (0.5 округляется вверх).
+ *
+ * Эти константы и схемы — единственный источник правды. Любая валидация
+ * оценки на сервере обязана проходить через gradeValueSchema.
+ */
+
+export const MIN_GRADE = 1;
+export const MAX_GRADE = 10;
+export const QUARTERS = [1, 2, 3, 4] as const;
+
+export type Quarter = (typeof QUARTERS)[number];
+
+/** Оценка: целое число строго 1..10. */
+export const gradeValueSchema = z
+  .number({ invalid_type_error: "Оценка должна быть числом" })
+  .int("Оценка должна быть целым числом")
+  .min(MIN_GRADE, `Минимальная оценка — ${MIN_GRADE}`)
+  .max(MAX_GRADE, `Максимальная оценка — ${MAX_GRADE}`);
+
+/** Четверть: целое число строго 1..4. */
+export const quarterSchema = z
+  .number({ invalid_type_error: "Четверть должна быть числом" })
+  .int("Четверть должна быть целым числом")
+  .min(1, "Четверть должна быть от 1 до 4")
+  .max(4, "Четверть должна быть от 1 до 4");
+
+export function isValidGradeValue(value: unknown): value is number {
+  return gradeValueSchema.safeParse(value).success;
+}
+
+export function isValidQuarter(value: unknown): value is Quarter {
+  return quarterSchema.safeParse(value).success;
+}
+
+/** Округление до нужного числа знаков без ошибок плавающей точки. */
+export function roundTo(value: number, digits: number): number {
+  const factor = 10 ** digits;
+  return Math.round((value + Number.EPSILON) * factor) / factor;
+}
+
+/**
+ * Средний балл за четверть — среднее арифметическое оценок,
+ * округлённое до сотых. Возвращает null, если оценок нет.
+ */
+export function averageGrade(values: readonly number[]): number | null {
+  if (values.length === 0) return null;
+  const sum = values.reduce((acc, v) => acc + v, 0);
+  return roundTo(sum / values.length, 2);
+}
+
+/**
+ * Годовая оценка по предмету — целое число 1..10.
+ * Считается как среднее средних баллов четвертей (учитываются только
+ * четверти, где есть оценки) с округлением до целого (0.5 -> вверх).
+ * Возвращает null, если за год нет ни одной оценки.
+ */
+export function yearGrade(quarterAverages: readonly (number | null)[]): number | null {
+  const filled = quarterAverages.filter((v): v is number => v !== null);
+  if (filled.length === 0) return null;
+  const avg = filled.reduce((acc, v) => acc + v, 0) / filled.length;
+  const rounded = Math.round(roundTo(avg, 4));
+  return Math.min(MAX_GRADE, Math.max(MIN_GRADE, rounded));
+}
+
+/** Красивый вывод среднего балла: 7.45 -> "7.45", null -> "—". */
+export function formatAverage(value: number | null): string {
+  if (value === null) return "—";
+  return value.toFixed(2);
+}
+
+/**
+ * Цветовая шкала оценок (единая для всего приложения):
+ * 1–3 — красный (неудовлетворительно), 4–5 — оранжевый (удовлетворительно),
+ * 6–7 — жёлтый (достаточно), 8–9 — зелёный (хорошо), 10 — синий (отлично).
+ */
+export function gradeColorClasses(value: number | null): string {
+  if (value === null) return "bg-slate-100 text-slate-400 dark:bg-slate-800 dark:text-slate-500";
+  if (value >= 10) return "bg-sky-100 text-sky-800 dark:bg-sky-500/20 dark:text-sky-200";
+  if (value >= 8) return "bg-emerald-100 text-emerald-800 dark:bg-emerald-500/20 dark:text-emerald-200";
+  if (value >= 6) return "bg-amber-100 text-amber-800 dark:bg-amber-500/20 dark:text-amber-100";
+  if (value >= 4) return "bg-orange-100 text-orange-800 dark:bg-orange-500/20 dark:text-orange-100";
+  return "bg-rose-100 text-rose-800 dark:bg-rose-500/20 dark:text-rose-200";
+}
+
+/** Та же шкала, но для средних баллов (нецелых). */
+export function averageColorClasses(value: number | null): string {
+  if (value === null) return "text-slate-400";
+  if (value >= 9) return "text-sky-600 dark:text-sky-300";
+  if (value >= 7.5) return "text-emerald-600 dark:text-emerald-300";
+  if (value >= 5.5) return "text-amber-600 dark:text-amber-300";
+  if (value >= 3.5) return "text-orange-600 dark:text-orange-300";
+  return "text-rose-600 dark:text-rose-300";
+}
+
+/**
+ * Подсказка «текущая четверть» по календарю (сен–окт — 1, ноя–дек — 2,
+ * янв–мар — 3, апр–авг — 4). Используется только как значение по умолчанию.
+ */
+export function guessCurrentQuarter(date = new Date()): Quarter {
+  const month = date.getMonth() + 1;
+  if (month >= 9 && month <= 10) return 1;
+  if (month >= 11) return 2;
+  if (month <= 3) return 3;
+  return 4;
+}
+
+export const QUARTER_LABELS: Record<Quarter, string> = {
+  1: "1 четверть",
+  2: "2 четверть",
+  3: "3 четверть",
+  4: "4 четверть",
+};

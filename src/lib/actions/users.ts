@@ -335,23 +335,55 @@ export async function updateUserRoleAction(input: {
     });
     if (!user) return actionFail("Пользователь не найден", 404);
 
-    await prisma.user.update({
-      where: { id: userId },
-      data: { role, className: role === "STUDENT" ? undefined : null },
-    });
+    const previousRole = asRole(user.role);
+
+    // Роль уходит ОТ «Родителя» — вычищаются его семейные привязки: связи с
+    // детьми, Telegram и живые коды. Иначе бывший родитель, ставший, например,
+    // учеником, сохранил бы канал уведомлений о чужих оценках.
+    // Роль уходит ОТ «Ученика» — рвутся связи, где он был ребёнком: read-модель
+    // /family не должна тащить учителя в списке «мои дети».
+    const [droppedChildren, droppedParents, droppedTelegram] = await prisma.$transaction(
+      async (tx) => {
+        await tx.user.update({
+          where: { id: userId },
+          data: { role, className: role === "STUDENT" ? undefined : null },
+        });
+        const children =
+          previousRole === "PARENT" && role !== "PARENT"
+            ? await tx.parentLink.deleteMany({ where: { parentId: userId } })
+            : { count: 0 };
+        const parents =
+          previousRole === "STUDENT" && role !== "STUDENT"
+            ? await tx.parentLink.deleteMany({ where: { studentId: userId } })
+            : { count: 0 };
+        const telegram =
+          previousRole === "PARENT" && role !== "PARENT"
+            ? await tx.telegramLink.deleteMany({ where: { userId } })
+            : { count: 0 };
+        if (previousRole === "PARENT" && role !== "PARENT") {
+          await tx.telegramLinkCode.deleteMany({ where: { userId } });
+        }
+        return [children.count, parents.count, telegram.count];
+      },
+    );
 
     // Смена роли — самое чувствительное действие администратора: именно она
     // выдаёт право менять оценки, поэтому в журнале изменений видны и прежняя
-    // роль, и новая.
+    // роль, и новая, и снятые семейные связи.
     await logAudit({
       actor: admin,
       action: "user.role",
       targetName: `${user.name} (${user.username})`,
-      details: `Роль изменена: ${ROLE_LABELS[asRole(user.role)]} → ${ROLE_LABELS[role]}`,
+      details:
+        `Роль изменена: ${ROLE_LABELS[previousRole]} → ${ROLE_LABELS[role]}` +
+        (droppedChildren > 0 ? `, отвязано детей: ${droppedChildren}` : "") +
+        (droppedParents > 0 ? `, отвязано родителей: ${droppedParents}` : "") +
+        (droppedTelegram > 0 ? ", Telegram отключён" : ""),
     });
 
     revalidatePath("/admin");
     revalidatePath("/journal");
+    revalidatePath("/family");
     return actionOk(null, "Роль обновлена");
   } catch (error) {
     return actionError(error);

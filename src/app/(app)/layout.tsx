@@ -14,6 +14,7 @@ const NAV_BY_ROLE: Record<Role, { href: string; label: string; exact?: boolean }
     { href: "/journal/subjects", label: "Предметы" },
     { href: "/journal/trash", label: "Корзина" },
     { href: "/journal/students", label: "Ученики" },
+    { href: "/admin/parents", label: "Семьи" },
     { href: "/journal/debts", label: "Долги" },
     { href: "/journal/year", label: "Учебный год" },
     { href: "/admin/audit", label: "Изменения" },

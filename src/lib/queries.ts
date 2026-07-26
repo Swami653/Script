@@ -1012,16 +1012,83 @@ export async function getRecentGradelessMarks(
 }
 
 export async function getAdminStats() {
-  const [admins, teachers, students, subjects, grades, lessons] = await Promise.all([
+  const [admins, teachers, students, parents, subjects, grades, lessons] = await Promise.all([
     prisma.user.count({ where: { role: "ADMIN" } }),
     prisma.user.count({ where: { role: "TEACHER" } }),
     prisma.user.count({ where: { role: "STUDENT" } }),
+    prisma.user.count({ where: { role: "PARENT" } }),
     prisma.subject.count(),
     prisma.grade.count({ where: { lesson: LIVE_LESSON } }),
     prisma.lesson.count({ where: LIVE_LESSON }),
   ]);
 
-  return { admins, teachers, students, subjects, grades, lessons };
+  return { admins, teachers, students, parents, subjects, grades, lessons };
+}
+
+/* ── Семьи (админка) ──────────────────────────────────────────────────────── */
+
+export type ParentRow = {
+  id: string;
+  name: string;
+  username: string;
+  /** Временный пароль — виден до первого входа (дисциплина tempPassword). */
+  tempPassword: string | null;
+  lastLoginAt: Date | null;
+  children: { id: string; name: string; className: string | null }[];
+  /** Состояние Telegram: привязан / заблокировал бота / код выдан / нет. */
+  telegram: "linked" | "blocked" | "code_issued" | "none";
+  codeExpiresAt: Date | null;
+};
+
+/** Раздел «Семьи» в админке. Вызывается ПОСЛЕ requirePageRole(["ADMIN"]). */
+export async function getParentsOverview(): Promise<ParentRow[]> {
+  const now = new Date();
+  const parents = await prisma.user.findMany({
+    where: { role: "PARENT" },
+    orderBy: { name: "asc" },
+    select: {
+      id: true,
+      name: true,
+      username: true,
+      tempPassword: true,
+      lastLoginAt: true,
+      parentLinks: {
+        select: {
+          student: { select: { id: true, name: true, className: true } },
+        },
+      },
+      telegramLink: { select: { blockedAt: true } },
+      telegramCodes: {
+        where: { usedAt: null, expiresAt: { gt: now } },
+        orderBy: { expiresAt: "desc" },
+        take: 1,
+        select: { expiresAt: true },
+      },
+    },
+  });
+
+  return parents.map((parent) => {
+    const liveCode = parent.telegramCodes[0] ?? null;
+    const telegram: ParentRow["telegram"] = parent.telegramLink
+      ? parent.telegramLink.blockedAt
+        ? "blocked"
+        : "linked"
+      : liveCode
+        ? "code_issued"
+        : "none";
+    return {
+      id: parent.id,
+      name: parent.name,
+      username: parent.username,
+      tempPassword: parent.tempPassword,
+      lastLoginAt: parent.lastLoginAt,
+      children: parent.parentLinks
+        .map((link) => link.student)
+        .sort((a, b) => a.name.localeCompare(b.name, "ru")),
+      telegram,
+      codeExpiresAt: liveCode?.expiresAt ?? null,
+    };
+  });
 }
 
 export async function getAllUsers() {

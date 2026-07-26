@@ -35,6 +35,10 @@ export const AUDIT_ACTIONS = [
   "mastery.clear",
   "note.save",
   "note.delete",
+  "parent.link",
+  "parent.unlink",
+  "telegram.code",
+  "telegram.unlink",
 ] as const;
 
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];
@@ -68,6 +72,10 @@ export const AUDIT_ACTION_LABELS: Record<AuditAction, string> = {
   "mastery.clear": "Уровень снят",
   "note.save": "Характеристика за четверть",
   "note.delete": "Характеристика удалена",
+  "parent.link": "Родитель привязан",
+  "parent.unlink": "Родитель отвязан",
+  "telegram.code": "Выдан код Telegram",
+  "telegram.unlink": "Telegram отвязан",
 };
 
 export function isAuditAction(value: unknown): value is AuditAction {

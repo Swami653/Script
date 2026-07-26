@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import Link from "next/link";
 
 import { BulkImportStudents } from "@/app/(app)/admin/bulk-import";
 import { CreateUserForm } from "@/app/(app)/admin/create-user-form";
@@ -18,6 +19,7 @@ export default async function AdminPage() {
 
   const figures = [
     { value: stats.students, forms: ["ученик", "ученика", "учеников"] as const },
+    { value: stats.parents, forms: ["родитель", "родителя", "родителей"] as const },
     { value: stats.teachers, forms: ["учитель", "учителя", "учителей"] as const },
     { value: stats.admins, forms: ["администратор", "администратора", "администраторов"] as const },
     { value: stats.subjects, forms: ["предмет", "предмета", "предметов"] as const },
@@ -47,6 +49,20 @@ export default async function AdminPage() {
             </div>
           ))}
         </dl>
+        <p className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-sm">
+          <Link
+            href="/admin/parents"
+            className="focus-ring rounded font-medium text-primary hover:underline"
+          >
+            Семьи: родители и привязки →
+          </Link>
+          <Link
+            href="/admin/attention"
+            className="focus-ring rounded font-medium text-primary hover:underline"
+          >
+            Требует внимания →
+          </Link>
+        </p>
       </header>
 
       <section className="grid gap-5 lg:grid-cols-[1.35fr_1fr]">

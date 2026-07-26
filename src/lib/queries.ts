@@ -3,6 +3,7 @@ import { ForbiddenError, type SessionUser } from "@/lib/auth-guards";
 import {
   asGradeKind,
   averageGrade,
+  isGradeKind,
   QUARTERS,
   weightedAverage,
   yearGrade,
@@ -10,6 +11,7 @@ import {
   type Quarter,
 } from "@/lib/grades";
 import { prisma } from "@/lib/prisma";
+import { addUtcDays, parseDateInputValue, toDateInputValue, todayUtcMidnight } from "@/lib/utils";
 
 /**
  * Чтение данных журнала. Все функции предполагают, что вызывающая сторона
@@ -34,6 +36,10 @@ export type JournalLesson = {
   date: Date;
   quarter: number;
   topic: string | null;
+  /** «Что задано» к этому уроку. null — не записано. */
+  homework: string | null;
+  /** Пометка планируемой работы — сырой TEXT из БД; UI приводит через isGradeKind. */
+  plannedKind: string | null;
 };
 
 /** Оценка в клетке. slot: 0 — первая, 1 — вторая («10/9»). */
@@ -126,7 +132,14 @@ export async function getJournalData(
     prisma.lesson.findMany({
       where: { subjectId, quarter, year, ...LIVE_LESSON },
       orderBy: { date: "asc" },
-      select: { id: true, date: true, quarter: true, topic: true },
+      select: {
+        id: true,
+        date: true,
+        quarter: true,
+        topic: true,
+        homework: true,
+        plannedKind: true,
+      },
     }),
     getStudents(className),
     prisma.grade.findMany({
@@ -316,6 +329,10 @@ export type SubjectLessonRow = {
   date: Date;
   quarter: number;
   topic: string | null;
+  /** «Что задано» к этому уроку. null — не записано. */
+  homework: string | null;
+  /** Пометка планируемой работы; защитное чтение через isGradeKind. */
+  plannedKind: GradeKind | null;
   grades: { value: number; kind: GradeKind; comment: string | null }[];
   absent: boolean;
 };
@@ -323,8 +340,10 @@ export type SubjectLessonRow = {
 export type StudentSubjectDetail = {
   student: { id: string; name: string; className: string | null };
   subject: { id: string; name: string };
-  /** Уроки по четвертям: 4 массива, в каждом — уроки предмета */
+  /** Прошедшие уроки по четвертям: 4 массива, в каждом — уроки предмета */
   byQuarter: SubjectLessonRow[][];
+  /** Будущие уроки (date > сегодня UTC) без оценок и без «Н», по возрастанию даты. */
+  upcoming: SubjectLessonRow[];
   quarterAverages: (number | null)[];
   year: number | null;
   totalGrades: number;
@@ -334,6 +353,11 @@ export type StudentSubjectDetail = {
 /**
  * Оценки ученика по одному предмету: дата урока, тема, оценки (с типом и
  * комментарием) и отметки «Н». Показываются ВСЕ уроки предмета — видно пропуски.
+ *
+ * После появления «Сетки на четверть» будущие уроки отделяются от прошедших:
+ * строка попадает в byQuarter, если урок уже был (date <= сегодня UTC) ИЛИ
+ * в ней есть оценки или «Н»; остальное — в upcoming. Партиция здесь, а не в
+ * компоненте: страницей пользуется и учитель (?student=), и ученик.
  */
 export async function getStudentSubjectDetail(
   studentId: string,
@@ -358,7 +382,14 @@ export async function getStudentSubjectDetail(
     prisma.lesson.findMany({
       where: { subjectId, year, ...LIVE_LESSON },
       orderBy: { date: "asc" },
-      select: { id: true, date: true, quarter: true, topic: true },
+      select: {
+        id: true,
+        date: true,
+        quarter: true,
+        topic: true,
+        homework: true,
+        plannedKind: true,
+      },
     }),
     prisma.grade.findMany({
       where: { studentId, subjectId, year, lesson: LIVE_LESSON },
@@ -379,21 +410,32 @@ export async function getStudentSubjectDetail(
   }
   const absentLessons = new Set(absences.map((a) => a.lessonId));
 
+  const todayUtc = todayUtcMidnight();
   const byQuarter: SubjectLessonRow[][] = [[], [], [], []];
+  const upcoming: SubjectLessonRow[] = [];
   const weightedByQuarter: { value: number; weight: number }[][] = [[], [], [], []];
   for (const lesson of lessons) {
     const index = lesson.quarter - 1;
     if (index < 0 || index > 3) continue;
     const cell = gradesByLesson.get(lesson.id) ?? [];
-    byQuarter[index]!.push({
+    const absent = absentLessons.has(lesson.id);
+    const row: SubjectLessonRow = {
       lessonId: lesson.id,
       date: lesson.date,
       quarter: lesson.quarter,
       topic: lesson.topic,
+      homework: lesson.homework,
+      plannedKind: isGradeKind(lesson.plannedKind) ? lesson.plannedKind : null,
       grades: cell.map((g) => ({ value: g.value, kind: asGradeKind(g.kind), comment: g.comment })),
-      absent: absentLessons.has(lesson.id),
-    });
-    for (const g of cell) weightedByQuarter[index]!.push({ value: g.value, weight: g.weight });
+      absent,
+    };
+    // Будущий урок без содержимого клетки — в «Впереди», а не в ленту четверти.
+    if (lesson.date <= todayUtc || cell.length > 0 || absent) {
+      byQuarter[index]!.push(row);
+      for (const g of cell) weightedByQuarter[index]!.push({ value: g.value, weight: g.weight });
+    } else {
+      upcoming.push(row);
+    }
   }
 
   const quarterAverages = weightedByQuarter.map((items) => weightedAverage(items));
@@ -402,10 +444,77 @@ export async function getStudentSubjectDetail(
     student,
     subject,
     byQuarter,
+    upcoming,
     quarterAverages,
     year: yearGrade(quarterAverages),
     totalGrades: grades.length,
     totalAbsences: absences.length,
+  };
+}
+
+export type AgendaLesson = {
+  lessonId: string;
+  date: Date;
+  subject: { id: string; name: string };
+  topic: string | null;
+  homework: string | null;
+  /** Пометка планируемой работы; защитное чтение через isGradeKind. */
+  plannedKind: GradeKind | null;
+};
+
+export type StudentAgenda = {
+  /** Запланированные работы: plannedKind != null, окно сегодня..+14 дней. */
+  planned: AgendaLesson[];
+  /** Домашние задания: homework != null, окно сегодня..+6 дней. */
+  homework: AgendaLesson[];
+  /** В активном году есть хоть один живой урок с домашкой — «фича в работе». */
+  homeworkInUse: boolean;
+};
+
+/**
+ * Агенда дневника: блоки «Впереди» и «Что задано». Только чтение; вызывается
+ * ПОСЛЕ гвардов страницы. Персональных данных нет — урок не привязан к классу,
+ * поэтому агенда глобальна по году, как и весь дневник (ограничение модели,
+ * фиксируется осознанно).
+ */
+export async function getStudentAgenda(year: number, today = new Date()): Promise<StudentAgenda> {
+  const todayUtc = parseDateInputValue(toDateInputValue(today));
+
+  const [lessons, homeworkCount] = await Promise.all([
+    prisma.lesson.findMany({
+      where: {
+        year,
+        ...LIVE_LESSON,
+        date: { gte: todayUtc, lt: addUtcDays(todayUtc, 15) },
+        OR: [{ NOT: { homework: null } }, { NOT: { plannedKind: null } }],
+      },
+      orderBy: [{ date: "asc" }, { subject: { name: "asc" } }],
+      select: {
+        id: true,
+        date: true,
+        topic: true,
+        homework: true,
+        plannedKind: true,
+        subject: { select: { id: true, name: true } },
+      },
+    }),
+    prisma.lesson.count({ where: { year, ...LIVE_LESSON, NOT: { homework: null } } }),
+  ]);
+
+  const items: AgendaLesson[] = lessons.map((lesson) => ({
+    lessonId: lesson.id,
+    date: lesson.date,
+    subject: lesson.subject,
+    topic: lesson.topic,
+    homework: lesson.homework,
+    plannedKind: isGradeKind(lesson.plannedKind) ? lesson.plannedKind : null,
+  }));
+
+  const homeworkHorizon = addUtcDays(todayUtc, 7);
+  return {
+    planned: items.filter((item) => item.plannedKind !== null),
+    homework: items.filter((item) => item.homework !== null && item.date < homeworkHorizon),
+    homeworkInUse: homeworkCount > 0,
   };
 }
 

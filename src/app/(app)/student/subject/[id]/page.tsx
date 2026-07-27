@@ -1,8 +1,9 @@
-import { ArrowLeft, CalendarDays } from "lucide-react";
+import { ArrowLeft, CalendarDays, HelpCircle } from "lucide-react";
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 
+import { ConfusionToggle } from "@/app/(app)/student/subject/[id]/confusion-toggle";
 import { requirePageUser } from "@/lib/auth-guards";
 import { notFoundOn404 } from "@/lib/family-guards";
 import { formatLevelCounts } from "@/lib/gradeless";
@@ -282,6 +283,26 @@ export default async function StudentSubjectPage({
                     {row.homework && (
                       <span className="mt-0.5 block text-xs text-muted-foreground">
                         Задано: {row.homework}
+                      </span>
+                    )}
+                    {/* «Не разобрался в теме»: переключатель — ТОЛЬКО у самого
+                        ученика (просьба личная, за него её не нажать) и только
+                        у прошедшего урока с темой. Работает и при «Н»:
+                        пропустившему тема как раз может быть непонятна. */}
+                    {viewer.role === "STUDENT" && row.topic && row.date <= today && (
+                      <ConfusionToggle
+                        lessonId={row.lessonId}
+                        confused={row.confused}
+                        gradeless={detail.assessment === "gradeless"}
+                      />
+                    )}
+                    {/* Учителю/администратору на карточке ученика — тихая
+                        пометка чтения. Родитель сюда не попадает, и в его
+                        данных confused всегда false (см. queries.ts). */}
+                    {(viewer.role === "TEACHER" || viewer.role === "ADMIN") && row.confused && (
+                      <span className="mt-1 flex items-center gap-1 text-[11px] text-primary">
+                        <HelpCircle className="h-3 w-3 shrink-0" aria-hidden />
+                        Просит объяснить ещё раз
                       </span>
                     )}
                   </span>

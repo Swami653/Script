@@ -1,6 +1,6 @@
 "use client";
 
-import { ClipboardCopy } from "lucide-react";
+import { ClipboardCopy, HelpCircle } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState, useTransition } from "react";
 import { createPortal } from "react-dom";
@@ -44,6 +44,7 @@ export function LessonInsight({
   origin,
   analysis,
   gradelessAnalysis,
+  totalStudents,
   onFlash,
   onClose,
 }: {
@@ -62,6 +63,8 @@ export function LessonInsight({
    * печати вместо гистограммы 1–10; null — безотметочных учеников нет.
    */
   gradelessAnalysis: GradelessColumnAnalysis | null;
+  /** Учеников в текущей выборке (M в строке «Просят объяснить: N из M»). */
+  totalStudents: number;
   onFlash: (tone: "success" | "error", text: string) => void;
   onClose: () => void;
 }) {
@@ -266,6 +269,33 @@ export function LessonInsight({
             </>
           )}
         </div>
+
+        {/* ── «Просят объяснить ещё раз»: отметки учеников «не разобрался в
+            теме». Блок тихий и появляется только при N > 0 — это просьба, а не
+            тревога (без красного/amber). Поимённый список — сознательно ТОЛЬКО
+            здесь, у учителя: одноклассники не видят ничего, родители — тоже
+            (см. решение приватности в queries.ts). ────────────────────────── */}
+        {lesson.confusedNames.length > 0 && (
+          <div className="space-y-1 border-b border-rule px-3 py-2.5">
+            <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+              Просят объяснить ещё раз
+            </p>
+            <p className="text-xs">
+              <HelpCircle
+                className="mr-1 inline-block h-3.5 w-3.5 align-[-2px] text-primary"
+                aria-hidden
+              />
+              <span className="font-semibold tabular-nums">{lesson.confusedNames.length}</span>{" "}
+              из <span className="font-semibold tabular-nums">{totalStudents}</span>
+              {": "}
+              {lesson.confusedNames.map(shortName).join(", ")}
+            </p>
+            <p className="text-[10px] leading-tight text-muted-foreground">
+              Ученики отметили «не разобрался в теме». Список видите только вы —
+              одноклассникам и родителям он не показывается.
+            </p>
+          </div>
+        )}
 
         {/* ── Блок «Анализ» оценочных строк: распределение, средний, % ────── */}
         {analysis && (

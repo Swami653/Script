@@ -5,6 +5,7 @@ import {
   ClipboardCheck,
   Eraser,
   ExternalLink,
+  HelpCircle,
   History,
   Hourglass,
   Trash2,
@@ -73,7 +74,14 @@ import {
   type GradeKind,
   type Quarter,
 } from "@/lib/grades";
-import { cn, formatDateLong, formatDateShort, shortName, todayUtcMidnight } from "@/lib/utils";
+import {
+  cn,
+  formatDateLong,
+  formatDateShort,
+  pluralize,
+  shortName,
+  todayUtcMidnight,
+} from "@/lib/utils";
 
 export type GridLesson = {
   id: string;
@@ -83,6 +91,13 @@ export type GridLesson = {
   homework: string | null;
   /** Пометка планируемой работы — сырой TEXT; сравнивается с "control" защитно. */
   plannedKind: string | null;
+  /**
+   * «Не разобрался в теме»: сколько учеников текущей выборки просят объяснить
+   * ещё раз и кто (порядок строк журнала). Учительские данные: грид рендерится
+   * только под requirePageRole(GRADE_EDITOR_ROLES).
+   */
+  confusedCount: number;
+  confusedNames: string[];
 };
 
 /** Панель урока: анализ/домашка/пометка (insight) или перекличка (attendance). */
@@ -1136,6 +1151,31 @@ export function JournalGrid({
                           КР
                         </span>
                       )}
+                      {/* «Не разобрался в теме»: тихий постоянный индикатор —
+                          это просьба, а не тревога, поэтому muted, без красного
+                          и без пульсации. Поимённый список — в панели урока
+                          (клик по дате). Место тесное: значок 2.5 + счётчик 9px
+                          в ряду с «КР» и hover-иконками. */}
+                      {lesson.confusedCount > 0 && (
+                        <span
+                          className="flex items-center gap-px text-muted-foreground"
+                          title={
+                            `${lesson.confusedCount} ` +
+                            pluralize(
+                              lesson.confusedCount,
+                              "ученик просит",
+                              "ученика просят",
+                              "учеников просят",
+                            ) +
+                            " объяснить тему ещё раз — список по клику на дату"
+                          }
+                        >
+                          <HelpCircle className="h-2.5 w-2.5" aria-hidden />
+                          <span className="text-[9px] font-semibold leading-none tabular-nums">
+                            {lesson.confusedCount}
+                          </span>
+                        </span>
+                      )}
                       {canEdit && (
                         <button
                           type="button"
@@ -1550,6 +1590,7 @@ export function JournalGrid({
             origin={lessonPanel.origin}
             analysis={panelAnalysis}
             gradelessAnalysis={panelGradelessAnalysis}
+            totalStudents={rows.length}
             onFlash={show}
             onClose={closeLessonPanel}
           />

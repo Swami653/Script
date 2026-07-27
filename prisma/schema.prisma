@@ -76,6 +76,8 @@ model User {
   /// Уроки, созданные пользователем как учителем.
   lessonsTaught Lesson[] @relation("TeacherLessons")
 
+  /// Отметки «не разобрался в теме», оставленные пользователем как учеником.
+  topicConfusions TopicConfusion[] @relation("StudentConfusions")
   /// Семья: связи «родитель → ребёнок», где этот пользователь — родитель.
   parentLinks ParentLink[] @relation("ParentSide")
   /// Связи, где этот пользователь — ребёнок.
@@ -137,6 +139,8 @@ model Lesson {
   /// Безотметочные отметки урока (1–2 классы): печати и уровни освоения.
   stamps       LessonStamp[]
   masteryMarks MasteryMark[]
+  /// Отметки учеников «не разобрался в теме» — просьбы объяснить ещё раз.
+  confusions TopicConfusion[]
 
   // Уникальность «один урок на дату по предмету» действует только для живых
   // уроков и живёт в частичном SQL-индексе Lesson_subjectId_date_live_key
@@ -343,6 +347,49 @@ model Debt {
   @@unique([studentId, lessonId])
   @@index([subjectId, year, quarter])
   @@index([studentId, year])
+}
+
+/// Отметка ученика «не разобрался в теме» — просьба объяснить тему урока ещё
+/// раз. ПЕРВЫЙ обратный поток данных в журнале: здесь ученик говорит системе,
+/// а не система об ученике. Строка существует = просьба живая; снятие отметки —
+/// удаление строки (надгробий нет: ребёнок передумал — следа не остаётся,
+/// это приватный сигнал, а не документ).
+///
+/// НЕ оценка и НЕ клетка журнала: в средние баллы не входит, с оценками,
+/// «Н» и уровнями не конфликтует (отсутствовавшему тема как раз может быть
+/// непонятна). Замок четверти отметку НЕ блокирует — по §1.4 CLAUDE.md замок
+/// защищает числа и состав столбцов, а не заметки.
+///
+/// ПРИВАТНОСТЬ (ядро фичи): отметку видят ТОЛЬКО сам ученик, учитель и
+/// администратор. Одноклассникам не отдаётся ни счётчик, ни факт отметки;
+/// родителю — ВООБЩЕ ничего (см. getStudentSubjectDetail), иначе ребёнок
+/// перестанет нажимать, боясь домашнего разбора.
+///
+/// subjectId — денормализованный скаляр БЕЗ FK (прецедент Absence/Debt:
+/// каскад чистки идёт цепочкой Subject -> Lesson -> TopicConfusion).
+/// ИНВАРИАНТ: subjectId/year/quarter всегда равны полям урока, заполняются
+/// только из lesson (см. src/lib/actions/confusion.ts). Удаление ученика
+/// уносит его отметки каскадом: вне ученика сигнал смысла не имеет.
+/// CHECK четверти — только в SQL (migrations/9a, прецедент миграции 7).
+model TopicConfusion {
+  id String @id @default(cuid())
+
+  studentId String
+  student   User   @relation("StudentConfusions", fields: [studentId], references: [id], onDelete: Cascade)
+
+  lessonId String
+  lesson   Lesson @relation(fields: [lessonId], references: [id], onDelete: Cascade)
+
+  subjectId String
+  year      Int
+  quarter   Int
+
+  createdAt DateTime @default(now())
+
+  /// Одна отметка на пару «ученик × урок»: повторное нажатие снимает её.
+  @@unique([studentId, lessonId])
+  @@index([subjectId, year, quarter])
+  @@index([studentId, subjectId, year])
 }
 
 /// Печать-поощрение за урок (безотметочные 1–2 классы): «Молодец», «Старание»…

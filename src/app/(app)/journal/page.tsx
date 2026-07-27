@@ -247,6 +247,8 @@ export default async function JournalPage({ searchParams }: { searchParams: Sear
           topic: lesson.topic,
           homework: lesson.homework,
           plannedKind: lesson.plannedKind,
+          confusedCount: lesson.confusedCount,
+          confusedNames: lesson.confusedNames,
         }))}
         rows={data.rows.map((row) => ({
           studentId: row.student.id,
